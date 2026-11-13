@@ -13,6 +13,8 @@
 // roamies-voice --perms                                   prints {"type":"perms","mic":…}
 // roamies-voice --devices                                 prints {"type":"devices",…}: every mic, the default, formats
 // roamies-voice --model <dir> --transcribe <wav>          dev: transcribe a file and exit
+// roamies-voice --model <dir> --serve                      the model loaded once; each stdin line {"id", "wav"} gets
+//                                                         {"id", "text"} (Discord calls; on macOS too, as roamies-stt)
 // roamies-voice --model <dir> --test-audio <wav>          dev: a file stands in for the mic ({"cmd":"listen"} starts)
 
 mod audio;
@@ -602,6 +604,23 @@ fn main() {
         windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
+    if args.iter().any(|a| a == "--serve") {
+        let dir = model.expect("--serve needs --model <dir>");
+        let mut asr = match load_model(&dir) { Ok(a) => a, Err(e) => { emit(json!({ "type": "error", "error": format!("model: {e}") })); return; } };
+        emit(json!({ "type": "ready" }));
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+            let id = msg.get("id").cloned().unwrap_or(Value::Null);
+            let Some(wav) = msg.get("wav").and_then(Value::as_str) else { continue };
+            match audio::read_wav(Path::new(wav)) {
+                Ok((samples, rate)) if rate == RATE => emit(json!({ "id": id, "text": transcribe(&mut asr, samples) })),
+                Ok((_, rate)) => emit(json!({ "id": id, "error": format!("{rate} Hz; send {RATE} Hz") })),
+                Err(e) => emit(json!({ "id": id, "error": e })),
+            }
+        }
+        return;
+    }
     if let Some(wav) = arg(&args, "--transcribe") {
         let dir = model.expect("--transcribe needs --model <dir>");
         let mut asr = load_model(&dir).unwrap_or_else(|e| panic!("model: {e}"));

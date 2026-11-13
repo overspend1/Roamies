@@ -227,21 +227,22 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
     },
     {
       name: 'discord_call',
-      description: `Join a Discord voice channel as ${userName}'s bot, to talk with them and their friends out loud in your voice, or leave it (leave: true). With no channel it joins the one ${userName} is in now. In the call you answer when someone says your name; ${userName}'s own requests can use your tools, friends just chat with you.`,
-      parameters: z.object({ channel: z.string().max(120).optional(), leave: z.boolean().optional() }),
+      description: `Join a Discord voice channel as ${userName}'s bot, to talk with them and their friends out loud in your voice, or leave it (leave: true). With no channel it joins the one ${userName} is in now. In the call you answer when someone says your name; ${userName}'s own requests can use your tools, friends just chat with you. voice: a Fish Audio voice id (32 letters and digits, from fish.audio) to speak with in calls from now on.`,
+      parameters: z.object({ channel: z.string().max(120).optional(), leave: z.boolean().optional(), voice: z.string().regex(/^[0-9a-f]{32}$/).optional() }),
       timeoutMs: 60_000,
-      execute: async ({ channel, leave }) => {
+      execute: async ({ channel, leave, voice }) => {
+        if (voice) { call?.setVoice?.(voice); if (inCall && !channel) return 'Voice changed; the next thing I say uses it.'; }
         if (leave) { if (!inCall) return 'Not in a call.'; inCall.leave(); inCall = null; onChange(); return 'Left the call.'; }
         if (!token || !me) throw new Error(`Discord isn't connected; discord_setup connects ${userName}'s bot.`);
         if (!call) throw new Error('Voice calls need a Fish Audio voice: add a Fish Audio key on the Voice page first.');
-        await call.check?.();
+        const note = await call.check?.();
         const where = voiceChannelFor(channel);
         if (inCall?.channelId === where.channel) return `Already in ${where.label}.`;
         inCall?.leave(); inCall = null;
         inCall = await joinCall({ guildId: where.guild, channelId: where.channel, adapterCreator: adapterCreator(where.guild), botId: me.id, isOwner, nameOf, ...call });
         inCall.label = where.label;
         onChange();
-        return `Joined ${where.label}. I answer when someone says my name, and keep talking while we're in a conversation; ${userName}'s requests can use my tools, friends just chat.${ownerId || owners().length ? '' : ` (I couldn't tell which Discord account is ${userName}'s, so nobody's voice gets the tools.)`}`;
+        return `Joined ${where.label}. I answer when someone says my name, and keep talking while we're in a conversation; ${userName}'s requests can use my tools, friends just chat.${ownerId || owners().length ? '' : ` (I couldn't tell which Discord account is ${userName}'s, so nobody's voice gets the tools.)`}${note ? ` ${note}` : ''}`;
       },
     },
     {

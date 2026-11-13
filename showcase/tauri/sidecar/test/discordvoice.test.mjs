@@ -19,7 +19,7 @@ m1.writeInt16LE(100, 0); m1.writeInt16LE(-100, 2); m2.writeInt16LE(300, 0);
 assert.deepEqual(samples(up(new Uint8Array(m1))), [100, 100, 100, 100, 0, 0, -100, -100], 'twice the rate, both channels, halfway samples between');
 assert.deepEqual(samples(up(new Uint8Array(m2))), [100, 100, 300, 300], 'carried across chunks: no click at the edge');
 // Said to it: its name as a word, any case, also with an s.
-for (const t of ['Roamie, what time is it?', 'hey roamies can you', 'ok ROAMIE', 'Hey everyone, Romy here.']) assert.ok(addressed(t, ['Roamie']), t);
+for (const t of ['Roamie, what time is it?', 'hey roamies can you', 'ok ROAMIE', 'Hey everyone, Romy here.', 'Romi, która godzina?', 'Słuchaj Rołmi']) assert.ok(addressed(t, ['Roamie']), t);
 for (const t of ['roaming charges', 'we talked about it', '']) assert.ok(!addressed(t, ['Roamie']), t);
 assert.ok(addressed('Jarvis, play it', ['Roamie', 'Jarvis']));
 

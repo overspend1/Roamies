@@ -38,7 +38,7 @@ export function toCallAudio() {
   };
 }
 // How speech recognition writes "Roamie" when it doesn't know the word (Apple's: "Romy").
-export const SOUNDS_LIKE = { roamie: ['romy', 'roamy', 'romie', 'romi', 'roami', 'roomie', 'romey'] };
+export const SOUNDS_LIKE = { roamie: ['romy', 'roamy', 'romie', 'romi', 'roami', 'roomie', 'romey', 'romii', 'roumi', 'rołmi'] };
 /** Was it said to Roamies: one of its names (or how recognition spells it) as a word ("Roamie, what's…", "hey roamies"). */
 export const addressed = (text, names) => names.flatMap((n) => [n, ...(SOUNDS_LIKE[String(n).toLowerCase()] ?? [])])
   .some((n) => n && new RegExp(`(^|[^\\p{L}])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}s?($|[^\\p{L}])`, 'iu').test(String(text)));

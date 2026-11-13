@@ -22,6 +22,13 @@ case "$TRIPLE" in
       cargo build --release --locked --manifest-path "src-tauri/$h-win/Cargo.toml" --target "$TRIPLE"
       cp "src-tauri/$h-win/target/$TRIPLE/release/roamies-$h.exe" "src-tauri/binaries/roamies-$h-$TRIPLE.exe"
     done ;;
+  # macOS: the same Rust helper as roamies-stt, for Discord calls (Parakeet hears Polish and English; Apple's
+  # recogniser doesn't do Polish). ONNX Runtime's prebuilt library wants macOS 13.4+ and clang's runtime linked in.
+  *-apple-darwin)
+    mkdir -p src-tauri/binaries
+    RT="$(clang -print-resource-dir)/lib/darwin/libclang_rt.osx.a"
+    RUSTFLAGS="-C link-arg=$RT" MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --release --locked --manifest-path src-tauri/voice-win/Cargo.toml --target "$TRIPLE"
+    cp "src-tauri/voice-win/target/$TRIPLE/release/roamies-voice" "src-tauri/binaries/roamies-stt-$TRIPLE" ;;
   *-linux-*)
     mkdir -p src-tauri/binaries
     cargo build --release --locked --manifest-path src-tauri/voice-win/Cargo.toml --target "$TRIPLE"

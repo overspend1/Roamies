@@ -3,6 +3,7 @@
     "externalBin": [
       "binaries/roamies-voice",
       "binaries/roamies-hands",
+      "binaries/roamies-stt",
       "binaries/node"
     ],
     "macOS": {
