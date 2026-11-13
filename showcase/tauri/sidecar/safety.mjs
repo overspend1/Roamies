@@ -463,6 +463,38 @@ export async function checkFetch(url, { lookup = dns.lookup } = {}) {
   return verdict(SAFE);
 }
 
+/** read_page: the whole text of the page open in a browser tab, read with one fixed script that only reads (never
+ *  model-written code). The app's name goes into that script, so it must be one of these browsers by its plain name;
+ *  only web pages are read (their own tab, so pages on this computer, like a local dev server, are fine). */
+export const PAGE_BROWSERS = ['Safari', 'Google Chrome', 'Chromium', 'Helium', 'Arc', 'Brave Browser', 'Microsoft Edge', 'Vivaldi', 'Opera'];
+export function checkPageRead(app, url) {
+  const name = PAGE_BROWSERS.find((b) => b.toLowerCase() === String(app ?? '').trim().toLowerCase());
+  if (!name) return verdict(BLOCK, `I can read whole pages in ${PAGE_BROWSERS.slice(0, -1).join(', ')} and ${PAGE_BROWSERS.at(-1)}, not in ${String(app ?? 'that app').slice(0, 40)}.`);
+  if (url === undefined) return { ...verdict(SAFE), app: name };
+  let u;
+  try { u = new URL(String(url)); } catch { return verdict(BLOCK, `That ${name} tab has no web address I can read.`); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return verdict(BLOCK, `I only read web pages (http and https), not ${u.protocol} pages.`);
+  return { ...verdict(SAFE), app: name };
+}
+
+/** Coding agents started in Herdr (herdr.mjs): one of these known agent CLIs, working in a folder Roamies could write
+ *  to (never a system or secrets folder). The agent asks its own questions, which reach the user. */
+export const CODER_KINDS = ['claude', 'codex', 'opencode', 'gemini', 'cursor', 'copilot', 'amp', 'qwen', 'kimi', 'droid'];
+export function checkCoder({ kind, cwd } = {}, home) {
+  if (!CODER_KINDS.includes(String(kind ?? ''))) return verdict(BLOCK, `kind must be one of ${CODER_KINDS.join(', ')}.`);
+  const dir = String(cwd ?? '').replace(/^~(?=$|\/)/, home);
+  if (!path.isAbsolute(dir)) return verdict(BLOCK, 'Give the folder as a full path (or one starting with ~).');
+  const v = checkWrite(path.join(dir, '.roamies-coder'), home);
+  return v.level === BLOCK ? verdict(BLOCK, `Not in ${cwd}: ${v.reason}`) : { ...verdict(SAFE), cwd: path.resolve(dir) };
+}
+/** Answering a coding agent's question (only with the user's answer): a few plain keys, nothing typed. */
+export function checkCoderKeys(keys) {
+  const list = Array.isArray(keys) ? keys.map((k) => String(k).trim().toLowerCase()) : [];
+  if (!list.length || list.length > 6) return verdict(BLOCK, 'Give 1 to 6 keys.');
+  const bad = list.find((k) => !/^(enter|esc|tab|up|down|left|right|space|y|n|[1-9])$/.test(k));
+  return bad ? verdict(BLOCK, `"${bad}" isn't a key I'll press for an agent: only enter, esc, tab, arrows, space, y, n or 1 to 9.`) : { ...verdict(SAFE), keys: list };
+}
+
 /** A link the user clicked in a reply: opened in their browser, so web and mail links only (no file:, apps or scripts). */
 export function checkLink(url) {
   let u;

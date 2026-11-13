@@ -28,10 +28,10 @@ const mgr = createAgents({
     if (e.type === 'done' || e.type === 'fail' || e.type === 'gone') onEnd?.(e);
   },
 });
-// The next agent's end (done, failed or stopped), within 20 s.
-const ended = () => new Promise((resolve, reject) => {
+// The next agent's end (done, failed or stopped), within 20 s; with `id()`, only that agent's.
+const ended = (id = null) => new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error(`no result in 20 s: ${JSON.stringify(events.map((e) => e.type))}`)), 20_000);
-  onEnd = (e) => { clearTimeout(t); onEnd = null; resolve(e); };
+  onEnd = (e) => { if (id && e.agent.id !== id()) return; clearTimeout(t); onEnd = null; resolve(e); };
 });
 const done = ended();
 const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.' });
@@ -43,7 +43,8 @@ assert.deepEqual(log.filter((l) => l.isError), [], 'every tool call worked');
 assert.equal(a.dir, path.join(tmp, 'data', 'Roamies', 'Agents', a.folder), 'its folder is under ROAMIES_DATA_DIR');
 // What the model was given: its brief, only its tools, a prompt about its folder.
 assert.match(log[0].prompt, /Brief from Ken:\nMake a landing page for Woof Co\./);
-assert.deepEqual([...log[0].tools].sort(), ['finish', 'list_files', 'plan', 'read_file', 'run_command', 'search_files', 'web_fetch', 'web_search', 'write_file']);
+assert.deepEqual([...log[0].tools].sort(), ['finish', 'list_files', 'plan', 'read_file', 'run_command', 'run_helpers', 'search_files', 'web_fetch', 'web_search', 'write_file']);
+assert.ok(!log[0].system.includes('Notes that earlier'), 'no lessons yet');
 assert.ok(log[0].system.includes(`Your folder is ${a.dir}.`));
 // It asked once (the command), not for overwriting its own file.
 const asks = events.filter((e) => e.type === 'ask');
@@ -81,6 +82,36 @@ assert.ok(fs.existsSync(path.join(b.dir, 'work', 'notes.md')), 'its notes stay i
 assert.match(fs.readFileSync(path.join(b.dir, 'history.md'), 'utf8'), /Outcome: GPT-6 and Claude 6 came out this week\.\nReport: GPT-6 and Claude 6 both came out this week\.\nSources: https:\/\/example\.com\/news\nPlace: https:\/\/example\.com\/news\n/);
 assert.match(await mgr.report(b.id), /Report: GPT-6 and Claude 6/, 'agent_report has the report');
 assert.equal(mgr.news().find((n) => n.id === b.id).report, 'GPT-6 and Claude 6 both came out this week.\nSources: https://example.com/news');
+// Lessons: the first run's are saved (the secret-looking one dropped), and the next maker reads them.
+const lessonsMd = fs.readFileSync(path.join(agentsRoot(), 'Agents', 'lessons.md'), 'utf8');
+assert.match(lessonsMd, /^- \d{4}-\d\d-\d\d maker: Woof Co likes orange headings\.$/m);
+assert.ok(!lessonsMd.includes('sk-ant'), 'a secret never lands in lessons');
+assert.ok(!/researcher:/.test(lessonsMd), 'the researcher left none');
+
+// Helpers: a maker splits its work; both helpers run in its work/helpers/, report to it, and are no news for the chat.
+process.env.FAKE_LOG = path.join(tmp, 'fake-split.log');
+let c = null;
+const doneC = ended(() => c?.id);
+c = await mgr.start({ type: 'maker', title: 'News summary', brief: 'Split this: find the news and summarise it.' });
+const endC = await doneC;
+const logC = fs.readFileSync(process.env.FAKE_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+assert.equal(endC.type, 'done', `${endC.agent.reason}\n${JSON.stringify(logC, null, 1)}`);
+assert.match(logC[0].system, /Notes that earlier maker agents left[^\n]*\n- Woof Co likes orange headings\./, 'the lesson reached the next maker');
+const helped = logC.find((l) => l.name === 'run_helpers');
+assert.equal(helped.isError, false, helped.result);
+assert.match(helped.result, /^- a\w+ "News check": done: GPT-6 and Claude 6 came out this week\.\n  Report: GPT-6 and Claude 6 both came out this week\./);
+assert.match(helped.result, /"Second check": done/, 'both ran');
+const helpers = mgr.list().filter((h) => h.parent === c.id);
+assert.equal(helpers.length, 2);
+for (const h of helpers) {
+  assert.ok(h.dir.startsWith(path.join(c.dir, 'work', 'helpers') + path.sep), 'a helper works inside its parent\'s folder');
+  assert.equal(h.state, 'done');
+}
+const helperLogs = logC.filter((l) => l.prompt && l.prompt.includes('latest LLM releases'));
+assert.equal(helperLogs.length, 2);
+assert.ok(helperLogs.every((l) => !l.tools.includes('run_helpers')), 'helpers get no helpers of their own');
+assert.deepEqual(mgr.news().map((n) => n.id).filter((id) => helpers.some((h) => h.id === id)), [], 'helper results go to the parent, not the chat');
+assert.match(mgr.liveText(), new RegExp(`"News check" \\(researcher, helper of ${c.id}\\)`));
 mgr.stopAll();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log('agentrun tests: passed');

@@ -55,7 +55,7 @@ func windows() -> [Win] {
 }
 
 /// Fuzzy app match: "browser" finds the frontmost known browser; otherwise a case-insensitive name match.
-let BROWSERS = ["Brave Browser", "Google Chrome", "Safari", "Arc", "Firefox", "Microsoft Edge", "Opera", "Vivaldi", "Chromium", "Orion", "Zen"]
+let BROWSERS = ["Brave Browser", "Google Chrome", "Helium", "Safari", "Arc", "Firefox", "Microsoft Edge", "Opera", "Vivaldi", "Chromium", "Orion", "Zen"]
 func appMatches(_ app: String, _ want: String) -> Bool {
     let w = want.lowercased().trimmingCharacters(in: .whitespaces)
     if ["browser", "web browser", "my browser"].contains(w) { return BROWSERS.contains(app) }

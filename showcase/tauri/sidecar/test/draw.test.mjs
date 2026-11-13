@@ -415,3 +415,49 @@ console.log('shape radius tests: passed');
   assert.ok(x / world.q >= b[0] - 0.1 && x / world.q <= b[2] + 0.1 && y / world.q >= b[1] - 0.1 && y / world.q <= b[3] + 0.1, 'outlines are in degrees × q');
   console.log('world outline tests: passed');
 }
+
+// ---- code and sketch cards: their checks, the highlighter, and what reaches the overlay
+{
+  const { highlightCode, codeLines, partDesc } = await import('../draw.mjs');
+  const one = (mark) => checkDraw({ beats: [{ say: 'x', marks: [mark] }] });
+  const fits = (mark) => DrawArgs.safeParse({ beats: [{ say: 'x', marks: [mark] }] }).success;
+  const snippet = 'def add(a, b):\n\treturn a + b  # sum\n\nprint(add(1, 2.5))\n';
+  assert.ok(fits({ kind: 'code', code: snippet, lang: 'python', focus: [2], title: 'add.py' }));
+  assert.deepEqual(one({ kind: 'code', code: snippet, lang: 'python', focus: [2] }), []);
+  assert.match(one({ kind: 'code', code: '   ' })[0], /needs code/);
+  assert.match(one({ kind: 'code', code: 'x\n'.repeat(41) })[0], /41 lines; show at most 40/);
+  assert.match(one({ kind: 'code', code: `x = "${'a'.repeat(95)}"` })[0], /line 1 is 101 characters/);
+  assert.match(one({ kind: 'code', code: 'a\nb', focus: [3] })[0], /focus 3: line numbers run from 1 to 2/);
+  assert.equal(partDesc({ kind: 'code', code: '\nconst a = 1;\nlet b' }), 'code “const a = 1;”');
+  // Lines as shown: tabs to two spaces, no trailing spaces, no blank lines around it (inside ones stay).
+  assert.deepEqual(codeLines('\n\tx  \n\ny\n\n'), ['  x', '', 'y']);
+  // Highlighting: kinds of runs, joined text is the line itself.
+  const rows = highlightCode(snippet, 'python');
+  assert.deepEqual(rows.map((r) => r.map(([t]) => t).join('')), codeLines(snippet), 'nothing lost or added');
+  const kinds = (r) => r.filter(([, k]) => k).map(([t, k]) => `${k}:${t.trim()}`);
+  assert.deepEqual(kinds(rows[0]), ['kw:def', 'fn:add', 'punct:(', 'punct:,', 'punct:):']);
+  assert.deepEqual(kinds(rows[1]), ['kw:return', 'punct:+', 'com:# sum']);
+  assert.deepEqual(kinds(rows[3]).filter((k) => !k.startsWith('punct')), ['fn:print', 'fn:add', 'num:1', 'num:2.5']);
+  const js = highlightCode('const s = "a // b"; /* one\ntwo */ let X1 = new Map(); // end', 'js');
+  assert.deepEqual(kinds(js[0]).filter((k) => !k.startsWith('punct')), ['kw:const', 'str:"a // b"', 'com:/* one'], 'a // inside a string is not a comment; a block comment runs on');
+  assert.deepEqual(kinds(js[1]).filter((k) => !k.startsWith('punct')), ['com:two */', 'kw:let', 'kw:new', 'fn:Map', 'com:// end']);
+  assert.deepEqual(kinds(highlightCode('SELECT name FROM users -- all', 'sql')[0]), ['com:-- all'], 'sql comments; capitals alone are not types');
+  assert.deepEqual(kinds(highlightCode('x1 = 0x1F; s = "a\\"b"', 'py')[0]), ['punct:=', 'num:0x1F', 'punct:;', 'punct:=', 'str:"a\\"b"'], 'hex numbers, escaped quotes, no number inside a name');
+  // Sketches: strokes in their own units.
+  const house = { kind: 'sketch', title: 'House', strokes: [{ points: [[0, 40], [50, 0], [100, 40]] }, { points: [[10, 40], [10, 100], [90, 100], [90, 40]], close: true, tone: 'amber' }, { points: [[40, 100], [40, 70], [60, 70], [60, 100]], smooth: true }], labels: [{ text: 'door', x: 50, y: 85 }] };
+  assert.ok(fits(house));
+  assert.deepEqual(one(house), []);
+  assert.match(one({ kind: 'sketch' })[0], /needs strokes/);
+  assert.match(one({ kind: 'sketch', strokes: [{ points: [[5, 5], [5, 5]] }] })[0], /same place/);
+  assert.ok(!fits({ kind: 'sketch', strokes: [{ points: [[1, 2]] }] }), 'a stroke needs two points');
+  assert.match(one({ kind: 'sketch', strokes: Array.from({ length: 10 }, () => ({ points: Array.from({ length: 160 }, (_, i) => [i, i % 7]) })) })[0], /1600 points in all; keep to 1500/);
+  // What the overlay gets: a code card arrives highlighted, a sketch as it was given.
+  const look = { text: async () => ({ bounds: [0, 0, 10, 10] }), pixel: async (x, y) => [x, y] };
+  const [b] = await resolveTargets([{ say: 'x', marks: [{ kind: 'code', code: snippet, lang: 'python' }, house] }], look);
+  assert.deepEqual(b.marks[0].rows, rows);
+  assert.deepEqual(b.marks[1].strokes, house.strokes);
+  // The overlay draws both.
+  const ink = (await import('node:fs')).readFileSync(new URL('../../../roamies/ink.js', import.meta.url), 'utf8');
+  for (const k of ['code', 'sketch']) assert.ok(ink.includes(`    ${k}: (m) => draw${k[0].toUpperCase()}${k.slice(1)}(m),`), `the overlay draws ${k}`);
+  console.log('code and sketch card tests: passed');
+}

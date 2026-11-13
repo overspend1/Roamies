@@ -1,18 +1,20 @@
 // The draw tool's pieces: the beats-and-marks schema (checked before anything draws), where each mark goes on the
 // real screen, the parts already drawn (p1, p2 …) so follow-ups can edit them, photos and favicons for cards, and a
 // small SMILES reader for molecules, a small LaTeX reader for maths, the layering of flow diagrams and the countries a
-// map can show. No model-written code ever runs: the overlay only draws these structures.
+// map can show, and a small highlighter for code cards. No model-written code ever runs: the overlay only draws these
+// structures.
 import { z } from 'zod';
 import { checkUrl } from './safety.mjs';
 import { COUNTRIES } from './countries.mjs';
 
 export const LIMITS = { beats: 12, marks: 40, points: 200, parts3d: 40, atoms: 120, photoBytes: 800_000, iconBytes: 64_000,
-  nodes: 16, links: 24, columns: 6, rows: 12, bars: 12, labels: 8, pins: 12, shade: 40, routes: 8, steps: 10, tex: 300, vertices: 16, questions: 6, cardsShown: 4 };
+  nodes: 16, links: 24, columns: 6, rows: 12, bars: 12, labels: 8, pins: 12, shade: 40, routes: 8, steps: 10, tex: 300, vertices: 16, questions: 6, cardsShown: 4,
+  strokes: 24, sketchPoints: 1500, codeChars: 3000, codeLines: 40, codeWidth: 90 };
 export const TONES = ['accent', 'teal', 'amber', 'coral', 'lilac', 'sky', 'lime', 'red', 'white'];
 // Marks on the real screen (they need a place on it), actions in apps, and cards drawn on calm space.
 export const SCREEN = ['point', 'target', 'hover', 'ring', 'frame', 'underline', 'strike', 'check', 'cross', 'connect', 'trace', 'num', 'label', 'write', 'scroll', 'spotlight', 'highlight', 'line', 'curve', 'arrow', 'circle', 'rect'];
 export const ACTIONS = ['emote', 'sfx', 'type', 'copy', 'open', 'handoff', 'button'];
-export const CARDS = ['card', 'note', 'list', 'clip', 'sources', 'photo', 'graph', 'legend', 'timeline', 'molecule', 'model', 'flow', 'table', 'bars', 'map', 'math', 'geometry', 'quiz', 'ticket', 'medal'];
+export const CARDS = ['card', 'note', 'list', 'clip', 'sources', 'photo', 'graph', 'legend', 'timeline', 'molecule', 'model', 'flow', 'table', 'bars', 'map', 'math', 'geometry', 'quiz', 'ticket', 'medal', 'code', 'sketch'];
 export const KINDS = [...SCREEN, ...ACTIONS, ...CARDS];
 // Drawn from a list of points (screenshot pixels) instead of one place.
 const PATHS = new Set(['trace', 'line', 'curve', 'arrow']);
@@ -71,6 +73,8 @@ const Mark = z.object({
   questions: z.array(z.object({ text: z.string().min(1).max(160), options: z.array(z.string().min(1).max(80)).min(2).max(4), answer: z.string().min(1).max(80), explain: z.string().max(200).optional() })).max(LIMITS.questions).optional(),
   action: z.object({ do: z.enum(['ask', 'open', 'copy']), value: z.string().min(1).max(600) }).optional(),
   task: z.string().max(120).optional(),
+  code: z.string().min(1).max(LIMITS.codeChars).optional(), lang: z.string().max(20).optional(), focus: z.array(z.number().int()).max(20).optional(),
+  strokes: z.array(z.object({ points: z.array(pair).min(2).max(LIMITS.points), tone: z.enum(TONES).optional(), close: z.boolean().optional(), smooth: z.boolean().optional() })).max(LIMITS.strokes).optional(),
 });
 const Beat = z.object({ say: z.string().min(1).max(240), marks: z.array(Mark).max(LIMITS.marks), wait: z.enum(['click', 'hover']).optional() });
 const Edit = z.object({ do: z.enum(['recolor', 'move', 'erase', 'clear']), part: z.string().max(8).optional(), tone: z.enum(TONES).optional(), dx: num.optional(), dy: num.optional() });
@@ -189,6 +193,22 @@ const CHECKS = {
     if (vs.every((v) => v.x === vs[0].x && v.y === vs[0].y)) out.push('every vertex is at the same place.');
     return out;
   },
+  code(m) {
+    if (!m.code?.trim()) return ['needs code (the snippet, with its line breaks).'];
+    const lines = codeLines(m.code), out = [];
+    if (lines.length > LIMITS.codeLines) out.push(`code has ${lines.length} lines; show at most ${LIMITS.codeLines}, the part that matters.`);
+    lines.forEach((l, k) => { if (l.length > LIMITS.codeWidth) out.push(`code line ${k + 1} is ${l.length} characters; keep each under ${LIMITS.codeWidth} (break it the way the language allows).`); });
+    for (const n of m.focus ?? []) if (!(n >= 1 && n <= lines.length)) out.push(`focus ${n}: line numbers run from 1 to ${lines.length}.`);
+    return out.slice(0, 4);
+  },
+  sketch(m) {
+    if (!m.strokes?.length) return ['needs strokes (each {points: [[x, y], …] in your own units, y down}).'];
+    const all = m.strokes.flatMap((st) => st.points), out = [];
+    if (all.length > LIMITS.sketchPoints) out.push(`the strokes have ${all.length} points in all; keep to ${LIMITS.sketchPoints} (fewer points, smooth: true rounds them).`);
+    if (all.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))) out.push('every point needs two plain numbers.');
+    else if (all.every(([x, y]) => x === all[0][0] && y === all[0][1])) out.push('every point is at the same place.');
+    return out;
+  },
   quiz(m) {
     if (!m.questions?.length) return ['needs questions (each {text, options, answer, explain}).'];
     const out = [];
@@ -299,6 +319,7 @@ export async function resolveTargets(beats, look) {
         if (m.kind === 'flow') o.lay = flowLayers(m.nodes, m.links);
         if (m.kind === 'map') Object.assign(o, resolveRegion(m));
         if (m.kind === 'math') o.steps = m.steps.map((s) => ({ ...s, tree: parseTex(s.tex) }));
+        if (m.kind === 'code') o.rows = highlightCode(m.code, m.lang);
         if (m.kind === 'quiz') o.questions = m.questions.map((q) => ({ ...q, right: q.options.map(sameText).indexOf(sameText(q.answer)) }));
         return [o];
       } catch (e) { throw new Error(`${where}: ${e?.message ?? e}`); }
@@ -313,7 +334,7 @@ const quote = (s) => `“${String(s).replace(/\s+/g, ' ').slice(0, 40)}”`;
 /** What a mark is, in a few words, for the tool result: ring “Export”, card “Compound interest”. */
 export function partDesc(m) {
   const words = m.label ?? m.title ?? m.heading ?? m.at?.name ?? m.text ?? m.query ?? m.smiles ?? m.region ?? m.nodes?.[0]?.text ?? m.columns?.join(', ')
-    ?? m.bars?.[0]?.label ?? m.steps?.[0]?.tex ?? m.questions?.[0]?.text ?? m.shade?.[0]?.name ?? m.pins?.[0]?.name ?? m.vertices?.map((v) => v.id).join('') ?? '';
+    ?? m.bars?.[0]?.label ?? m.steps?.[0]?.tex ?? m.questions?.[0]?.text ?? m.shade?.[0]?.name ?? m.pins?.[0]?.name ?? m.vertices?.map((v) => v.id).join('') ?? m.code?.trim().split('\n')[0] ?? '';
   return `${m.kind}${words ? ` ${quote(words)}` : ''}`;
 }
 /** How a quiz answered on screen went, for the model: the score and what was missed. m: the quiz mark as it was
@@ -769,4 +790,46 @@ export function parseTex(src) {
   const tree = row(null, 0);
   if (i < s.length) fail(s[i] === ']' ? 'a ] without its [' : `"${s[i]}" is out of place`);
   return tree;
+}
+
+// ---------------------------------------------------------------- code cards: lines of tokens, worked out here
+// A small, forgiving highlighter, not a parser: comments, strings, numbers, keywords, function names and type names,
+// for the languages people ask about most. Its output is plain text runs with a class; the overlay only paints them.
+const KEYWORDS = new Set(('abstract and as async await break case catch class const continue def default defer del do elif else enum export '
+  + 'extends extern false final finally fn for from func function go if impl implements import in interface is lambda let loop match mod '
+  + 'module mut new nil none not null of or package pass private protected pub public raise return self static struct super switch then '
+  + 'this throw throws trait true try type typeof undefined unsafe use var void where while with yield echo fi done local elseif end '
+  + 'select insert update delete into values set create table drop alter join on group by order having limit union distinct').split(' '));
+const HASH = new Set(['py', 'python', 'rb', 'ruby', 'sh', 'bash', 'zsh', 'shell', 'yaml', 'yml', 'toml', 'r', 'perl', 'pl', 'make', 'makefile', 'dockerfile', 'nix', 'elixir', 'ex', 'powershell', 'ps1']);
+const DASH = new Set(['sql', 'lua', 'haskell', 'hs', 'elm']);
+/** Code as it's shown: tabs as two spaces, no trailing spaces, no blank lines at either end. */
+export const codeLines = (src) => String(src ?? '').replace(/\r\n?/g, '\n').replace(/\t/g, '  ').split('\n').map((l) => l.replace(/\s+$/, '')).join('\n').replace(/^\n+|\n+$/g, '').split('\n');
+/** → one array per line of [text, cls] runs; cls: kw, str, num, com, fn, type, punct or '' (plain). */
+export function highlightCode(src, lang = '') {
+  const L = String(lang).toLowerCase(), line = HASH.has(L) ? '#' : DASH.has(L) ? '--' : '//', block = !HASH.has(L) && !DASH.has(L);
+  let inBlock = false;
+  return codeLines(src).map((ln) => {
+    const out = [], push = (t, c) => { if (!t) return; const last = out[out.length - 1]; if (last && last[1] === c) last[0] += t; else out.push([t, c]); };
+    let i = 0;
+    while (i < ln.length) {
+      if (inBlock) { const e = ln.indexOf('*/', i); if (e < 0) { push(ln.slice(i), 'com'); i = ln.length; } else { push(ln.slice(i, e + 2), 'com'); i = e + 2; inBlock = false; } continue; }
+      const rest = ln.slice(i), ch = ln[i];
+      if (rest.startsWith(line)) { push(rest, 'com'); break; }
+      if (block && rest.startsWith('/*')) { inBlock = true; continue; }
+      if (ch === '"' || ch === "'" || ch === '`') {
+        let j = i + 1; while (j < ln.length && ln[j] !== ch) j += ln[j] === '\\' ? 2 : 1;
+        push(ln.slice(i, j + 1), 'str'); i = j + 1; continue;
+      }
+      const num = /^(?:0[xX][\da-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(rest);
+      if (num && !/[\w$]/.test(ln[i - 1] ?? '')) { push(num[0], 'num'); i += num[0].length; continue; }
+      const word = /^[A-Za-z_$][\w$]*/.exec(rest);
+      if (word) {
+        const w = word[0], after = ln.slice(i + w.length);
+        push(w, KEYWORDS.has(w) ? 'kw' : /^\s*\(/.test(after) ? 'fn' : /^[A-Z]/.test(w) && /[a-z]/.test(w) ? 'type' : '');
+        i += w.length; continue;
+      }
+      push(ch, /[\s\w]/.test(ch) ? '' : 'punct'); i++;
+    }
+    return out;
+  });
 }

@@ -116,6 +116,13 @@ const redact = (t) => redactText(String(t), { secrets: (secrets ??= environmentS
 // Things redactText doesn't know (it catches keys and tokens): card-like digit runs and named secrets.
 const SECRETISH = /\b(?:\d[ -]?){12,19}\b|\b(?:password|passcode|passphrase|pin code|api key|secret key|access token|2fa code|one-time code)\b/i;
 
+/** One line worth keeping (a fact, an agent's lesson): redacted, one line, 3 to 240 characters, nothing secret-looking.
+ *  '' when it doesn't pass. */
+export function cleanNote(text) {
+  const t = redact(text ?? '').replace(/\s+/g, ' ').trim();
+  return t.length < 3 || t.length > 240 || t.includes(REDACTION_MARKER) || SECRETISH.test(t) ? '' : t;
+}
+
 /** The model's JSON → { summary, facts: [{ text, replaces? }] }. Throws if there's no usable JSON. */
 export function parseBrain(text, { knownIds = [], wantSummary = false } = {}) {
   const raw = String(text ?? '').replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '');
@@ -124,8 +131,8 @@ export function parseBrain(text, { knownIds = [], wantSummary = false } = {}) {
   const j = JSON.parse(raw.slice(a, b + 1));
   const known = new Set(knownIds);
   const facts = (Array.isArray(j.facts) ? j.facts : []).flatMap((f) => {
-    const t = redact(typeof f === 'string' ? f : f?.text ?? '').replace(/\s+/g, ' ').trim();
-    if (t.length < 3 || t.length > 240 || t.includes(REDACTION_MARKER) || SECRETISH.test(t)) return [];
+    const t = cleanNote(typeof f === 'string' ? f : f?.text ?? '');
+    if (!t) return [];
     const replaces = typeof f?.replaces === 'string' && known.has(f.replaces) ? f.replaces : undefined;
     return [replaces ? { text: t, replaces } : { text: t }];
   }).slice(0, 20);

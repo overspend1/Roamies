@@ -317,3 +317,27 @@ console.log('hands tests: passed');
   console.log('front line tests: passed');
 }
 
+
+// read_page: the whole page from the browser (paged), or the public copy when the browser doesn't allow reading.
+{
+  const { readPage } = await import('../tools.mjs');
+  const page = 'Title\n\n' + 'word '.repeat(9000);
+  const calls = [];
+  const browser = (jsOn) => async (lines, args = []) => { calls.push({ lines, args }); if (lines[0].includes('return URL of')) return 'https://news.example.com/story'; if (!jsOn) throw new Error('Executing JavaScript through AppleScript is turned off.'); return page; };
+  const one = await readPage({ app: 'helium', run: browser(true), frontApp: async () => 'Finder', fetchPublic: async () => 'public' });
+  assert.match(one, /^https:\/\/news\.example\.com\/story \(45007 characters in all\)\nTitle\n\nword /);
+  assert.match(one, /…25007 more characters: read_page with offset 20000\./);
+  assert.ok(calls[0].lines[0].startsWith('tell application "Helium" to return URL of active tab of front window'), 'the checked name goes into the script');
+  assert.deepEqual(calls[1].args.length, 1, 'the script it runs is passed as data, never built from the model\'s words');
+  const last = await readPage({ app: 'Helium', offset: 40000, run: browser(true), frontApp: async () => '', fetchPublic: async () => '' });
+  assert.ok(!/more characters/.test(last) && last.includes('word'), 'the last part says nothing more');
+  calls.length = 0;
+  const safari = await readPage({ frontApp: async () => 'Safari', run: browser(false), fetchPublic: async (url, off) => `fetched ${url} @${off}` });
+  assert.ok(calls[0].lines[0].includes('URL of front document'), 'Safari has its own words');
+  assert.match(safari, /^Safari doesn't let apps read its pages yet, so this is https:\/\/news\.example\.com\/story fetched from the web: without the user's login/);
+  assert.match(safari, /Develop > "Allow JavaScript from Apple Events"/);
+  assert.match(safari, /fetched https:\/\/news\.example\.com\/story @0$/);
+  await assert.rejects(readPage({ frontApp: async () => 'Terminal', run: browser(true), fetchPublic: async () => '' }), /not in Terminal\. Bring the browser to the front/);
+  await assert.rejects(readPage({ app: 'Helium', run: async () => 'file:///etc/passwd', frontApp: async () => '', fetchPublic: async () => '' }), /only read web pages/);
+  console.log('read_page tests: passed');
+}

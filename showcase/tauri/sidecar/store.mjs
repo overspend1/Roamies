@@ -66,24 +66,63 @@ export function newSession(provider, model) {
   return { version: 1, id: `${stamp(now)}-${randomBytes(3).toString('hex')}`, startedAt: now.getTime(), lastActiveAt: now.getTime(), provider, model, messages: [] };
 }
 
+// Session files, most recently used first (by when each was last saved): an older chat picked up again counts as
+// recent, so it's the one that resumes and it isn't pruned for having started long ago.
+async function byRecent() {
+  let names;
+  try { names = (await fs.readdir(SESSIONS)).filter((n) => SESSION_FILE.test(n)); } catch { return []; }
+  const at = await Promise.all(names.map((n) => fs.stat(path.join(SESSIONS, n)).then((st) => st.mtimeMs, () => 0)));
+  return names.map((n, i) => [n, at[i]]).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? 1 : -1)).map(([n]) => n);
+}
+// A Get to Know Me chat is its own conversation: never resumed or listed.
+const usable = (s) => s?.version === 1 && Array.isArray(s.messages) && s.kind !== 'intro';
+
 export async function loadLatestSession() {
-  let names = [];
-  try { names = (await fs.readdir(SESSIONS)).filter((n) => SESSION_FILE.test(n)).sort().reverse(); } catch { return null; }
-  for (const n of names.slice(0, 5)) {
+  for (const n of (await byRecent()).slice(0, 5)) {
     const s = readJson(path.join(SESSIONS, n));
-    // A Get to Know Me chat is its own conversation: the one from before it carries on.
-    if (s?.version === 1 && Array.isArray(s.messages) && s.kind !== 'intro') return s;
+    if (usable(s)) return s;
   }
   return null;
 }
 
+/** One saved chat by its id, or null (unknown, unreadable, or not a chat). */
+export function loadSession(id) {
+  if (!/^\d{8}-\d{6}-[a-z0-9]{6}$/.test(String(id))) return null;
+  const s = readJson(path.join(SESSIONS, `${id}.json`));
+  return usable(s) ? s : null;
+}
+
+const textOf = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.filter((p) => p?.type === 'text').map((p) => p.text).join(' ') : '');
+// What they asked (its first line, without the time stamp in front), or '' for what the app wrote in their turn: a
+// system note ("[stamp] (System, …)") or a summary.
+const requestOf = (m) => {
+  if (m?.role !== 'user' || isSummary(m)) return '';
+  const t = textOf(m.content).replace(/^\s*\[[^\]\n]{0,80}\]\s*/, '').split('\n')[0].replace(/\s+/g, ' ').trim();
+  return t.startsWith('(') ? '' : t;
+};
+/** A chat's name: its first real request, cut to 60 characters. */
+export function chatTitle(messages) {
+  const t = (messages ?? []).map(requestOf).find(Boolean);
+  return !t ? 'Untitled chat' : t.length > 60 ? `${t.slice(0, 59)}…` : t;
+}
+
+/** The saved chats, most recently used first: { id, title, startedAt, lastActiveAt, requests }. */
+export async function listSessions(limit = 15) {
+  const out = [];
+  for (const n of await byRecent()) {
+    if (out.length >= limit) break;
+    const s = readJson(path.join(SESSIONS, n));
+    if (!usable(s) || !s.messages.length) continue;
+    out.push({ id: s.id, title: chatTitle(s.messages), startedAt: s.startedAt, lastActiveAt: s.lastActiveAt, requests: s.messages.filter(requestOf).length });
+  }
+  return out;
+}
+
 export const saveSession = (s) => (s?.messages.length ? writeJson(path.join(SESSIONS, `${s.id}.json`), s) : Promise.resolve());
 
-/** Keeps the newest sessions. Only touches files this module names, in this folder. */
+/** Keeps the most recently used sessions. Only touches files this module names, in this folder. */
 export async function pruneSessions() {
-  let names;
-  try { names = (await fs.readdir(SESSIONS)).filter((n) => SESSION_FILE.test(n)).sort(); } catch { return; }
-  const drop = names.slice(0, Math.max(0, names.length - KEEP_SESSIONS));
+  const drop = (await byRecent()).slice(KEEP_SESSIONS);
   if (!drop.length) return;
   console.error(`[store] pruning ${drop.length} old session(s), keeping ${KEEP_SESSIONS}`);
   for (const n of drop) {

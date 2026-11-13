@@ -1,6 +1,22 @@
 {
   "updates": [
     {
+      "version": null,
+      "date": "2026-11-13",
+      "items": [
+        { "kind": "new", "title": "Terminals and coders", "text": "I run commands and coding agents like Claude Code in Herdr, shown in Ghostty." },
+        { "kind": "new", "title": "Helper agents", "text": "Big jobs get split: an agent hands parts to helpers that work at the same time." },
+        { "kind": "new", "title": "Agents learn", "text": "Agents leave notes on what worked, and the next agent reads them first." },
+        { "kind": "new", "title": "Several chats", "text": "Ask me to list your chats or go back to one, and we carry on where we left off." },
+        { "kind": "new", "title": "Read whole pages", "text": "I read the whole page in your browser, even the parts you haven't scrolled to." },
+        { "kind": "new", "title": "Code and sketch cards", "text": "I can show code with highlighting, and sketch layouts and ideas on a card." },
+        { "kind": "improved", "title": "Show, not just tell", "text": "I point at and mark what I'm talking about on your screen far more often." },
+        { "kind": "new", "title": "Pick your microphone", "text": "Choose which mic I listen on, on the Voice page." },
+        { "kind": "fixed", "title": "Headphones sound right", "text": "Talking no longer drops Bluetooth headphones to call quality or leaves them muted." },
+        { "kind": "new", "title": "Modded by @overspend1", "text": "This build is a mod. See who made the changes on the About page." }
+      ]
+    },
+    {
       "version": "0.1.37",
       "date": "2026-11-13",
       "items": [

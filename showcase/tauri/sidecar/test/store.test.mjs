@@ -101,11 +101,40 @@ fs.writeFileSync(path.join(dir, 'memory.json'), 'garbage');
 const fresh = await import(STORE + '?again');
 assert.ok(fresh.openCommitments().length >= 1, 'recovered from .bak');
 
+// Several chats: listed most recently used first, by their first real request; one picked up again resumes.
+{
+  const sub = path.join(dir, 'sessions');
+  const older = { ...S.newSession('p', 'm'), id: '20260101-090000-old111', messages: [{ role: 'user', content: `${S.SUMMARY_HEAD}\nKen asked about flights.` }, { role: 'user', content: '[Fri, 2 Jan 2026, 09:00:00 Europe/Warsaw] (System, not Ken: news from your background agents.)' }, { role: 'user', content: [{ type: 'text', text: '[Fri, 2 Jan 2026, 09:01:00 Europe/Warsaw] Plan my   trip to Tokyo in May\n(Meanwhile, from your agents: done)' }] }, { role: 'assistant', content: [] }, { role: 'user', content: '[Fri, 2 Jan 2026, 09:02:00 Europe/Warsaw] thanks' }] };
+  await S.saveSession(older);
+  const t = new Date(2026, 0, 1); fs.utimesSync(path.join(sub, `${older.id}.json`), t, t);
+  const list = await S.listSessions();
+  assert.equal(list[0].id, s.id, 'the newest first');
+  const o = list.find((c) => c.id === older.id);
+  assert.equal(o.title, 'Plan my trip to Tokyo in May', 'named by its first real request');
+  assert.equal(o.requests, 2, 'system notes and summaries are not requests');
+  assert.ok(!list.some((c) => c.id.endsWith('intro1')), 'never a Get to Know Me chat');
+  assert.equal(S.chatTitle([{ role: 'user', content: 'x'.repeat(80) }]).length, 60);
+  assert.equal(S.chatTitle([]), 'Untitled chat');
+  assert.equal(S.loadSession(older.id).id, older.id);
+  for (const bad of ['../memory', '20260101-090000-old111/../../x', '', null, '20991231-000000-nope00']) assert.equal(S.loadSession(bad), null, `refused: ${bad}`);
+  // Picked up again: it's saved now, so it's the one that resumes after a restart.
+  await S.saveSession({ ...older, lastActiveAt: Date.now() });
+  assert.equal((await S.loadLatestSession()).id, older.id);
+  assert.equal((await S.listSessions())[0].id, older.id);
+  fs.unlinkSync(path.join(sub, `${older.id}.json`));
+}
+
 // pruning keeps 60 newest, never touches other files
 fs.writeFileSync(path.join(dir, 'sessions', 'notes.txt'), 'mine');
 fs.writeFileSync(path.join(dir, 'sessions', '20200101-000000-aaaaa0.folded.jsonl'), '{}\n');
 fs.writeFileSync(path.join(dir, 'sessions', `${s.id}.folded.jsonl`), '{}\n');
-for (let i = 0; i < 70; i++) fs.writeFileSync(path.join(dir, 'sessions', `2020${String(1 + (i % 12)).padStart(2, '0')}${String(1 + i % 28).padStart(2, '0')}-000000-${String(i).padStart(6, 'a')}.json`), '{}');
+// Old chats: last saved in 2020 too (pruning goes by when a chat was last used, not when it started).
+for (let i = 0; i < 70; i++) {
+  const f = path.join(dir, 'sessions', `2020${String(1 + (i % 12)).padStart(2, '0')}${String(1 + i % 28).padStart(2, '0')}-000000-${String(i).padStart(6, 'a')}.json`);
+  fs.writeFileSync(f, '{}');
+  const t = new Date(2020, i % 12, 1 + i % 28);
+  fs.utimesSync(f, t, t);
+}
 await S.pruneSessions();
 const left = fs.readdirSync(path.join(dir, 'sessions'));
 assert.equal(left.filter((n) => /^\d{8}-\d{6}-[a-z0-9]{6}\.json$/.test(n)).length, 60);

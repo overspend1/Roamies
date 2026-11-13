@@ -907,6 +907,8 @@
     flow: (m) => drawFlow(m),
     math: (m) => drawMath(m),
     geometry: (m) => drawGeometry(m),
+    code: (m) => drawCode(m),
+    sketch: (m) => drawSketch(m),
     map: (m) => drawMap(m),
     quiz: (m) => drawQuiz(m),
     ticket: (m) => drawTicket(m),
@@ -1497,6 +1499,62 @@
     for (const q of angles) { await trace(on(q.pts), 0.25, (e) => (q.p = e)); q.done = now(); sfx('blip'); }
     for (const v of vs) see(v.id);
     touch(1);
+  }
+
+  // ---------------------------------------------------------------- sketches: freehand strokes, fitted to the card
+  // The strokes come in the model's own units (y down) and are scaled to fill the drawing area, then drawn one after
+  // another with the pen, outlines first as they were given; labels land at their points once the lines are down.
+  async function drawSketch(m) {
+    const w = 360, GW = w - 48, GH = 240, h = 26 + GH + 32;
+    const bx = boxOf(m.strokes.flatMap((st) => st.points)), k = Math.min(GW / Math.max(bx[2], 1e-9), GH / Math.max(bx[3], 1e-9));
+    const P2 = ([px, py]) => [24 + (GW - bx[2] * k) / 2 + (px - bx[0]) * k, 16 + (GH - bx[3] * k) / 2 + (py - bx[1]) * k];
+    const strokes = m.strokes.map((st) => {
+      let pts = st.points.map(P2);
+      if (st.smooth && pts.length >= 3) pts = catmull(pts, !!st.close); else if (st.close) pts = [...pts, pts[0]];
+      return { tone: st.tone, pts: handPath(pts, 0.5), p: 0 };
+    });
+    const labels = (m.labels ?? []).map((q) => ({ text: q.text, at: P2([q.x, q.y]), born: null }));
+    const c = await card(m, w, h, function (b, l, t, x, y) {
+      const mine = colorOf(this, this.color);
+      strokes.forEach((q, i) => pen(b, l, this, placed(this, `s${i}`, q.pts, x, y), q.p, q.tone ? tone(q.tone) : mine, { key: `s${i}`, w: 2.6 }));
+      for (const q of labels) if (q.born != null) typed(b, q.text, x + q.at[0], y + q.at[1] + 4, SMALL, TEXT, (t - q.born) / 0.3, { anchor: 'middle', rim: 3 });
+    }, { title: m.title || 'sketch' });
+    const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26], on = (pts) => pts.map(([px, py]) => [px + x, py + y]);
+    for (const q of strokes) await trace(on(q.pts), clamp(len(q.pts) / 600, 0.2, 0.9), (e) => (q.p = e));
+    for (const q of labels) { await fly(x + q.at[0], y + q.at[1]); q.born = now(); touch(0.4); await sleep(120); }
+    touch(1);
+  }
+
+  // ---------------------------------------------------------------- code: highlighted lines with numbers
+  // The sidecar sends each line as runs of [text, kind] (draw.mjs highlightCode); the card is as wide as the longest
+  // line (300 to 680) and scrolls when it's taller than the screen. Lines in focus get a lit bar; it types in quickly.
+  const CODE_COL = { kw: TONES.lilac, str: TONES.lime, num: TONES.coral, com: DIM, fn: TONES.sky, type: ACC, punct: '#9fd6cc' };
+  async function drawCode(m) {
+    const CF = `400 12px ${MONO}`, NF = `500 10px ${MONO}`, LH = 18, rows = m.rows ?? [], n = rows.length;
+    const gut = textW(String(n), NF) + 24, widest = Math.max(0, ...rows.map((r) => textW(r.map(([str]) => str).join(''), CF)));
+    const w = clamp(Math.ceil(widest) + gut + 28, 300, 680), h = 26 + 12 + n * LH + 12, focus = new Set(m.focus ?? []);
+    let shown = 0; // lines typed in so far
+    const c = await card(m, w, h, function (b, l, t, x, y) {
+      const lit = colorOf(this, this.color);
+      rows.forEach((r, i) => {
+        const top = y + 12 + i * LH, base = top + 13, on = focus.has(i + 1);
+        if (on) { b.fillStyle = rgba(lit, 0.13); b.fillRect(x + 4, top, w - 8, LH); b.fillStyle = lit; b.fillRect(x + 4, top, 2, LH); }
+        const u = clamp(shown - i, 0, 1);
+        if (u <= 0) return;
+        typed(b, String(i + 1), x + gut - 12, base, NF, on ? TEXT : rgba(DIM, 0.6), 1, { anchor: 'end' });
+        let left = Math.ceil(r.reduce((s2, [str]) => s2 + str.length, 0) * u), cx = x + gut;
+        b.font = CF; b.textBaseline = 'alphabetic'; b.textAlign = 'left';
+        for (const [str, kind] of r) { if (left <= 0) break; b.fillStyle = CODE_COL[kind] ?? TEXT; b.fillText(str.slice(0, left), cx, base); left -= str.length; cx += textW(str, CF); }
+      });
+      if (shown < n) touch(0.1);
+    }, { title: m.title || m.lang || 'code' });
+    const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];
+    await fly(x + gut, y + 12);
+    await tween(clamp(n * 0.05, 0.3, 1.4), (u) => { shown = u * n; penApi()?.set?.(x + gut, y + 12 + Math.min(u * n, Math.max(0, n - 1)) * LH); });
+    shown = n; touch(1);
+    // The pen comes to rest beside the first line in focus, if any.
+    const first = [...focus].sort((a, b) => a - b)[0];
+    if (first) await fly(x + 10, y + 12 + (first - 1) * LH + LH / 2);
   }
 
   // ---------------------------------------------------------------- maps: country outlines (world.js), pins and routes

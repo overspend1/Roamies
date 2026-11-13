@@ -48,6 +48,9 @@ for (const [ask, card] of [['How something works or happens', /a model with movi
   assert.match(show.slice(at, at + 260), card, `${ask}: names its card`);
 }
 assert.match(show, /draw it without being asked/, 'explaining draws by itself');
+assert.match(show, /whenever what you say is about something on their screen[^.]*, mark it with draw while you say it, even when they didn't ask where it is/, 'pointing at what it talks about is the default');
+assert.match(show, /Explaining code: a code card with focus[^.]*\. A layout[^:]*: a sketch\./, 'the code and sketch cards have their questions');
+assert.match(side, /for a web page in their browser, read_page gets all of it, also what's scrolled out of view/, 'whole pages are read with read_page');
 assert.match(show, /Don't draw for a quick fact[^.]*, an opinion or advice, small talk, a yes or no, anything they asked for in one line or one sentence, or when they say not to: those are just said\./, 'what stays plain speech');
 // Regression: the voice style said explanations are "spoken, not put on screen", which argued against drawing them.
 assert.ok(!/an explanation, advice\) is spoken, not put on screen/.test(side), 'the voice style no longer keeps explanations off the screen');
@@ -70,7 +73,7 @@ assert.match(drawText, /your reply after draw never repeats or rephrases it \(no
 assert.match(side, /m\.type === 'quiz_done'\) onQuizDone\(/, 'the overlay reports a finished quiz');
 assert.match(side, /const quiz = takeQuizNote\(\);[^]{0,400}?const stamped = `\[\$\{stampNow\(\)\}\] \$\{text\}\$\{quiz \? `\\n\(\$\{quiz\}\)` : ''\}/, 'the score rides along with their next message');
 assert.match(side, /const stamped = [^\n]*\$\{quiz \? `\\n\(\$\{quiz\}\)` : ''\}\$\{along\}`;/, "untold agent news rides along with their message");
-assert.match(side, /newSession\(config\.provider, config\.model\); liveBlocks\.clear\(\); agent = null; pendingFold = null; lastInput = null; quizDone = null;/, 'a new conversation drops it');
+assert.match(side, /session = next; liveBlocks\.clear\(\); agent = null; pendingFold = null; lastInput = null; quizDone = null;/, 'a new or switched conversation drops it');
 // Background agents: one short paragraph says when to start one (only when asked, or after offering long hands-off
 // work), that its brief is complete, and that a launch is the whole reply; their state rides in the memory section.
 const agentLine = side.split('\n').find((l) => l.startsWith('Agents: send_agent starts a background agent'));

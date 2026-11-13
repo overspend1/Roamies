@@ -7,7 +7,14 @@ const STEPS = [
   ['write_file', { path: 'files/index.html', content: '<h1>Woof</h1>' }],
   ['write_file', { path: 'files/index.html', content: '<h1>Woof Co</h1>' }], // overwriting its own file: no yes needed
   ['run_command', { command: `node -e "require('fs').writeFileSync('work/scratch.txt', 'x')"` }], // runs code: asks once (and works in cmd too)
-  ['finish', { outcome: 'Made a one-page site for Woof Co.', files: [{ path: 'files/index.html', what: 'the page' }] }],
+  ['finish', { outcome: 'Made a one-page site for Woof Co.', files: [{ path: 'files/index.html', what: 'the page' }], lessons: ['Woof Co likes orange headings.', 'My key is sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789'] }],
+];
+// Big work split in two: one helper finds something out while this one waits, then it writes the summary.
+const SPLIT = [
+  ['plan', { now: 'Splitting the work' }],
+  ['run_helpers', { helpers: [{ type: 'researcher', title: 'News check', brief: 'Find out the latest LLM releases.' }, { type: 'researcher', title: 'Second check', brief: 'Find out the latest LLM releases again.' }] }],
+  ['write_file', { path: 'files/summary.md', content: 'GPT-6, Claude 6' }],
+  ['finish', { outcome: 'Wrote a summary of the news.', files: [{ path: 'files/summary.md', what: 'the summary' }] }],
 ];
 // Asked for an answer (agentSystem says so): notes in work/, then a report and where it looked, no files. The first
 // finish leaves the report out, so the check's error comes back and it tries again.
@@ -27,7 +34,8 @@ export default class FakeAgent {
     async function* run() {
       o.running = true;
       let i = 0;
-      for (const [name, args] of /wants an answer, not a file/.test(o.o.system) ? ANSWER : STEPS) {
+      const text = typeof content === 'string' ? content : content[0].text;
+      for (const [name, args] of /wants an answer, not a file/.test(o.o.system) ? ANSWER : /Split this/.test(text) ? SPLIT : STEPS) {
         const id = `t${++i}`;
         yield { type: 'tool_call_start', toolCallId: id, name, args };
         let isError = false, result;

@@ -411,3 +411,34 @@ console.log('safety loophole tests: passed');
   assert.equal(looked, false, 'a blocked URL is refused before any lookup');
   console.log('checkFetch tests: passed');
 }
+
+// read_page: only known browsers by their plain name (it goes into a fixed AppleScript), only web pages.
+{
+  const { checkPageRead } = await import('../safety.mjs');
+  for (const app of ['Helium', 'helium', ' Google Chrome ', 'Safari', 'Arc', 'Brave Browser', 'Microsoft Edge']) assert.equal(checkPageRead(app, 'https://example.com/a').level, SAFE, app);
+  assert.equal(checkPageRead('helium', 'https://x.com').app, 'Helium', 'the real name is what goes into the script');
+  assert.equal(checkPageRead('Google Chrome').level, SAFE, 'the app alone, before its address is known');
+  assert.equal(checkPageRead('Chrome', 'http://localhost:3000/').level, BLOCK, 'not a browser name it knows ("Google Chrome" is)');
+  for (const app of ['Firefox', 'Terminal', '1Password 7', 'Helium" to do shell script "rm -rf ~', 'Safari\nquit', '', null])
+    assert.equal(checkPageRead(app, 'https://example.com').level, BLOCK, `refused: ${JSON.stringify(app)}`);
+  assert.equal(checkPageRead('Helium', 'http://localhost:5173/').level, SAFE, "their own tab may be a local dev server");
+  for (const url of ['file:///Users/ken/.ssh/id_rsa', 'chrome://settings', 'javascript:alert(1)', 'about:blank', 'not a url', ''])
+    assert.equal(checkPageRead('Helium', url).level, BLOCK, `refused: ${url}`);
+  console.log('page read tests: passed');
+}
+
+// Coding agents in Herdr: known agent CLIs only, in folders Roamies may write to; answers are a few plain keys.
+{
+  const { checkCoder, checkCoderKeys } = await import('../safety.mjs');
+  const home = '/Users/ken';
+  assert.equal(checkCoder({ kind: 'claude', cwd: '/Users/ken/code/app' }, home).level, SAFE);
+  assert.equal(checkCoder({ kind: 'codex', cwd: '~/code/app' }, home).cwd, '/Users/ken/code/app', '~ is their home');
+  for (const [args, why] of [[{ kind: 'bash', cwd: '/Users/ken/code' }, 'not an agent CLI'], [{ kind: 'claude; rm -rf ~', cwd: '/Users/ken' }, 'no extras in the kind'],
+    [{ kind: 'claude', cwd: 'code/app' }, 'a relative folder'], [{ kind: 'claude', cwd: '/Users/ken/.ssh' }, 'a secrets folder'], [{ kind: 'claude', cwd: '/System/Library' }, 'a system folder'], [{ kind: 'claude' }, 'no folder']])
+    assert.equal(checkCoder(args, home).level, BLOCK, why);
+  assert.deepEqual(checkCoderKeys(['Enter']).keys, ['enter']);
+  assert.equal(checkCoderKeys(['down', 'down', 'enter']).level, SAFE);
+  assert.equal(checkCoderKeys(['2']).level, SAFE);
+  for (const keys of [[], ['rm -rf /'], ['ctrl+c'], ['yes'], ['10'], Array(7).fill('down'), 'enter', null]) assert.equal(checkCoderKeys(keys).level, BLOCK, `refused: ${JSON.stringify(keys)}`);
+  console.log('coder rule tests: passed');
+}
