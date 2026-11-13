@@ -27,9 +27,9 @@ export function sideThinking(provider, model, cap) {
   return LEVELS.indexOf(cap) < LEVELS.indexOf(lowest) ? cap : lowest;
 }
 
-async function once({ system, text, provider, model, cc, credsFor, cwd, signal, chatThinking }) {
+async function once({ system, text, provider, model, cc, credsFor, cwd, signal, chatThinking, tools = [] }) {
   const thinking = sideThinking(provider, model, chatThinking);
-  const common = { model, system, tools: [], maxTurns: 1, thinking, signal };
+  const common = { model, system, tools, maxTurns: tools.length ? 4 : 1, thinking, signal };
   const agent = cc
     ? new ClaudeCodeAgent({ ...common, executable: cc.executable, env: cc.env, cwd })
     : new Agent({

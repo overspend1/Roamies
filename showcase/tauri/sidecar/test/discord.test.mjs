@@ -14,7 +14,7 @@ assert.deepEqual(resolveTarget('444444444444444444', guilds), { channel: '444444
 assert.match(resolveTarget('rm -rf /', guilds).error, /isn't a channel/);
 assert.equal(messageLine({ author: { username: 'ola', global_name: 'Ola' }, content: 'see you\n at 8', timestamp: '2026-11-13T18:30:00Z', attachments: [{ filename: 'map.png' }] }), '[2026-11-13 18:30] Ola: see you at 8 [map.png]');
 assert.equal(inviteUrl('99'), `https://discord.com/oauth2/authorize?client_id=99&scope=bot&permissions=${PERMISSIONS}`);
-assert.equal(PERMISSIONS, 68608, 'view channels, send messages, read history: nothing more');
+assert.equal(PERMISSIONS, 1024 + 2048 + 65536 + 1048576 + 2097152, 'view channels, send messages, read history, connect and speak: nothing more');
 
 // ---- a stand-in Discord ----
 const TOKEN = `MTIz.${'a'.repeat(60)}`;
@@ -27,7 +27,7 @@ const fetch = async (url, o) => {
   const res = (status, body) => ({ status, ok: status < 300, json: async () => body });
   if (o.headers.Authorization !== `Bot ${TOKEN}`) return res(401, { message: '401: Unauthorized' });
   if (route === '/users/@me') return res(200, { id: '900', username: 'roamiesbot' });
-  if (route === '/oauth2/applications/@me') return res(200, { id: '901' });
+  if (route === '/oauth2/applications/@me') return res(200, { id: '901', owner: { id: '42' } });
   if (route.startsWith('/guilds/') && route.includes('members/search')) return res(200, /query=tomek/.test(route) ? [{ user: { id: '555', username: 'tomek' } }] : []);
   if (route === '/users/@me/channels') return res(200, { id: `dm-${JSON.parse(o.body).recipient_id}` });
   if (o.method === 'GET' && /\/channels\/\d+\/messages/.test(route)) return res(200, [{ id: '2', author: { id: '7', username: 'ola' }, content: 'second', timestamp: '2026-11-13T18:31:00Z' }, { id: '1', author: { id: '7', username: 'ola' }, content: 'first', timestamp: '2026-11-13T18:30:00Z' }]);
@@ -41,8 +41,10 @@ class FakeSocket {
   close(code) { this.closed = code; }
   in(p) { this.onmessage({ data: JSON.stringify(p) }); }
 }
-const asked = [];
+const asked = [], joined = [];
+const callDeps = { names: () => ['Roamie'], transcribe: async () => '', synth: async () => {}, answer: async () => '' };
 const d = createDiscord({
+  call: callDeps, joinCall: async (o) => { joined.push(o); return { leave: () => { joined.at(-1).left = true; }, channelId: o.channelId, guildId: o.guildId }; },
   getToken: async () => saved, saveToken: async (t) => { saved = t; }, removeToken: async () => { saved = null; },
   askToken: async () => TOKEN, confirm: async (q) => { asked.push(q); return answer === 'Send'; }, checkMessage: checkDiscordMessage,
   userName: 'Ken', fetch, WebSocket: FakeSocket, retryMs: 1,
@@ -54,7 +56,7 @@ await assert.rejects(tool('discord_read').execute({ to: '#general' }), /isn't se
 
 // Setup: the token comes from the hidden field, is checked with Discord, saved, and the gateway connects.
 out(await tool('discord_setup').execute({}));
-function out(t) { assert.match(t, /^Connected as roamiesbot\. To add it to Ken's server, they open: https:\/\/discord\.com\/oauth2\/authorize\?client_id=901&scope=bot&permissions=68608\./); }
+function out(t) { assert.match(t, /^Connected as roamiesbot\. To add it to Ken's server, they open: https:\/\/discord\.com\/oauth2\/authorize\?client_id=901&scope=bot&permissions=3214336\./); }
 assert.equal(saved, TOKEN);
 const ws = sockets.at(-1);
 assert.equal(ws.url, 'wss://gateway.discord.gg/?v=10&encoding=json');
@@ -65,7 +67,7 @@ ws.in({ op: 0, s: 2, t: 'GUILD_CREATE', d: { id: 'g1', name: 'Crew', channels: [
 ws.in({ op: 1 });
 assert.deepEqual(ws.out.at(-1), { op: 1, d: 2 }, 'a heartbeat when asked, with the last sequence');
 assert.match(d.liveText(), /^Discord: connected as the bot roamiesbot, in 1 server\./);
-assert.match(await tool('discord_list').execute({}), /- Crew: #general$/m, 'text channels only');
+assert.match(await tool('discord_list').execute({}), /- Crew: #general; voice: Voice$/m, 'text and voice channels apart');
 
 // Friends' messages: DMs and @mentions are news (their words as information); other chatter isn't.
 ws.in({ op: 0, s: 3, t: 'MESSAGE_CREATE', d: { id: 'a1', channel_id: 'dm-7', author: { id: '7', username: 'ola', global_name: 'Ola' }, content: 'ask Ken if he is free tonight', timestamp: '2026-11-13T18:00:00Z' } });
@@ -94,6 +96,28 @@ const before = sent.length;
 await assert.rejects(tool('discord_send').execute({ to: '#general', text: '@everyone party' }), /No @everyone/);
 await assert.rejects(tool('discord_send').execute({ to: '@nobody', text: 'hi' }), /I don't know @nobody yet/);
 assert.equal(sent.length, before, 'nothing went out');
+// A voice call: the one Ken is in, through this connection's voice adapter; leave hangs up.
+await assert.rejects(tool('discord_call').execute({}), /Ken isn't in a voice channel the bot can see/);
+ws.in({ op: 0, s: 7, t: 'GUILD_CREATE', d: { id: 'g1', name: 'Crew', channels: [{ id: '111111111111111111', name: 'general', type: 0 }, { id: '666666666666666666', name: 'Hang out', type: 2 }], voice_states: [{ user_id: '42', channel_id: '666666666666666666' }] } });
+assert.match(await tool('discord_list').execute({}), /- Crew: #general; voice: Hang out$/m);
+assert.equal(await tool('discord_call').execute({}), "Joined Hang out in Crew. I answer when someone says my name; Ken's requests can use my tools, friends just chat.");
+const j = joined[0];
+assert.deepEqual([j.guildId, j.channelId, j.botId, j.ownerId], ['g1', '666666666666666666', '900', '42'], 'Ken is the app\'s owner');
+assert.equal(j.answer, callDeps.answer);
+assert.match(d.liveText(), /In the voice call in Hang out in Crew now/);
+// The voice library's adapter: its payloads go out on the gateway, and the bot's voice events come back to it.
+const got = [];
+const ad = j.adapterCreator({ onVoiceStateUpdate: (x) => got.push(['state', x.session_id]), onVoiceServerUpdate: (x) => got.push(['server', x.endpoint]), destroy: () => {} });
+assert.equal(ad.sendPayload({ op: 4, d: { guild_id: 'g1', channel_id: '666666666666666666' } }), true);
+assert.deepEqual(ws.out.at(-1), { op: 4, d: { guild_id: 'g1', channel_id: '666666666666666666' } });
+ws.in({ op: 0, s: 8, t: 'VOICE_STATE_UPDATE', d: { guild_id: 'g1', user_id: '7', channel_id: '666666666666666666', session_id: 'not-mine' } });
+ws.in({ op: 0, s: 9, t: 'VOICE_STATE_UPDATE', d: { guild_id: 'g1', user_id: '900', channel_id: '666666666666666666', session_id: 'sess' } });
+ws.in({ op: 0, s: 10, t: 'VOICE_SERVER_UPDATE', d: { guild_id: 'g1', token: 't', endpoint: 'voice.example' } });
+assert.deepEqual(got, [['state', 'sess'], ['server', 'voice.example']], 'only the bot\'s own voice state');
+assert.equal(await tool('discord_call').execute({ channel: 'Crew/Hang out' }), 'Already in Hang out in Crew.');
+await assert.rejects(tool('discord_call').execute({ channel: 'Crew/general' }), /^Error: No voice channel general in Crew that the bot can see\. discord_list shows the voice channels\.$/);
+assert.equal(await tool('discord_call').execute({ leave: true }), 'Left the call.');
+assert.ok(j.left);
 assert.match(await tool('discord_read').execute({ to: '#general' }), /^#general in Crew, oldest first:\n\[2026-11-13 18:30\] ola: first\n\[2026-11-13 18:31\] ola: second$/);
 
 // Message Content off in the bot's settings (4014): it reconnects without it (DMs and mentions still have words).

@@ -7,13 +7,14 @@ import { z } from 'zod';
 
 const API = 'https://discord.com/api/v10';
 const GATEWAY = 'wss://gateway.discord.gg/?v=10&encoding=json';
-// Servers, their messages, DMs, and what messages say (Message Content, switched on in the bot's settings).
-export const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
+// Servers, who is in which voice channel, their messages, DMs, and what messages say (Message Content, switched on
+// in the bot's settings).
+export const INTENTS = (1 << 0) | (1 << 7) | (1 << 9) | (1 << 12) | (1 << 15);
 const NO_CONTENT = INTENTS & ~(1 << 15); // without it, DMs and @mentions still come with their words
-// View channels, send messages, read message history: what the invite link asks for.
-export const PERMISSIONS = 1024 + 2048 + 65536;
+// View channels, send messages, read message history, and join and speak in voice: what the invite link asks for.
+export const PERMISSIONS = 1024 + 2048 + 65536 + 1048576 + 2097152;
 export const inviteUrl = (appId) => `https://discord.com/oauth2/authorize?client_id=${appId}&scope=bot&permissions=${PERMISSIONS}`;
-const TEXT_CHANNEL = new Set([0, 5]);
+const TEXT_CHANNEL = new Set([0, 5]), VOICE_CHANNEL = 2; // stage channels (13) aren't for chatting
 const clip = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 /** A message as one line: [time] who: what (attachments named). */
@@ -30,9 +31,9 @@ export function resolveTarget(to, guilds) {
   const t = String(to ?? '').trim();
   if (/^\d{15,22}$/.test(t)) return { channel: t };
   if (t.startsWith('@') && t.length > 1) return { user: t.slice(1).toLowerCase() };
-  const m = /^(?:(.+?)\s*\/\s*)?#?([\w-]{1,100})$/u.exec(t);
+  const m = /^(?:(.+?)\s*\/\s*)?#?\s*([^/#\s][^/#]{0,99})$/u.exec(t);
   if (!m) return { error: `"${t}" isn't a channel (#general, or Server/#general) or a person (@name).` };
-  const [, server, name] = m;
+  const [, server] = m, name = m[2].trim();
   const hits = guilds.filter((g) => !server || g.name.toLowerCase() === server.toLowerCase())
     .flatMap((g) => g.channels.filter((c) => c.name.toLowerCase() === name.toLowerCase()).map((c) => ({ ...c, guild: g.name })));
   if (!hits.length) return { error: `No channel #${name}${server ? ` in ${server}` : ''} that the bot can see. discord_list shows them.` };
@@ -45,9 +46,13 @@ export function resolveTarget(to, guilds) {
  * ctx) → bool, checkMessage (safety.checkDiscordMessage), userName, fetch, WebSocket, log, onChange() (the live
  * state changed), now.
  */
-export function createDiscord({ getToken, saveToken, removeToken, askToken, confirm, checkMessage, userName = 'the user', fetch = globalThis.fetch, WebSocket = globalThis.WebSocket, log = () => {}, onChange = () => {}, now = () => Date.now(), retryMs = 5000 }) {
-  let token = null, me = null, ws = null, beat = null, seq = null, intents = INTENTS, retries = 0, stopped = true, problem = null;
-  const guilds = new Map(); // id → { id, name, channels: [{ id, name }] }
+export function createDiscord({ getToken, saveToken, removeToken, askToken, confirm, checkMessage, userName = 'the user', fetch = globalThis.fetch, WebSocket = globalThis.WebSocket, log = () => {}, onChange = () => {}, now = () => Date.now(), retryMs = 5000,
+  call = null, joinCall = async (o) => (await import('./discordvoice.mjs')).joinCall(o) }) {
+  let token = null, me = null, ws = null, beat = null, seq = null, intents = INTENTS, retries = 0, stopped = true, problem = null, ownerId = null, inCall = null;
+  const guilds = new Map(); // id → { id, name, channels: [{ id, name }], voice: [{ id, name }] }
+  const voiceOf = new Map(); // user id → { guild, channel }: who is in which voice channel
+  const adapters = new Map(); // guild id → the voice library's handlers, while it joins or is in a call
+  const names = new Map(); // user id → display name
   const people = new Map(); // lowercased name → { id, name, dm } (people who wrote, so "@name" finds them)
   const inbox = []; // untold: { id, who, where, text, at, told }
 
@@ -62,10 +67,22 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
   }
 
   // ---------- the live connection: servers, and messages to the bot ----------
-  const remember = (u, dm = null) => { const name = u.global_name || u.username; for (const k of new Set([u.username, u.global_name].filter(Boolean).map((s) => s.toLowerCase()))) people.set(k, { id: u.id, name, dm: dm ?? people.get(k)?.dm ?? null }); };
+  const remember = (u, dm = null) => { const name = u.global_name || u.username; names.set(u.id, name); for (const k of new Set([u.username, u.global_name].filter(Boolean).map((s) => s.toLowerCase()))) people.set(k, { id: u.id, name, dm: dm ?? people.get(k)?.dm ?? null }); };
   function dispatch(t, d) {
     if (t === 'READY') { me = d.user; retries = 0; problem = null; onChange(); }
-    else if (t === 'GUILD_CREATE') { guilds.set(d.id, { id: d.id, name: d.name, channels: (d.channels ?? []).filter((c) => TEXT_CHANNEL.has(c.type)).map((c) => ({ id: c.id, name: c.name })) }); onChange(); }
+    else if (t === 'GUILD_CREATE') {
+      const list = d.channels ?? [];
+      guilds.set(d.id, { id: d.id, name: d.name, channels: list.filter((c) => TEXT_CHANNEL.has(c.type)).map((c) => ({ id: c.id, name: c.name })), voice: list.filter((c) => c.type === VOICE_CHANNEL).map((c) => ({ id: c.id, name: c.name })) });
+      for (const vs of d.voice_states ?? []) if (vs.channel_id) voiceOf.set(vs.user_id, { guild: d.id, channel: vs.channel_id });
+      for (const m of d.members ?? []) if (m.user) names.set(m.user.id, m.nick || m.user.global_name || m.user.username);
+      onChange();
+    }
+    else if (t === 'VOICE_STATE_UPDATE') {
+      if (d.channel_id) voiceOf.set(d.user_id, { guild: d.guild_id, channel: d.channel_id }); else voiceOf.delete(d.user_id);
+      if (d.member?.user) names.set(d.user_id, d.member.nick || d.member.user.global_name || d.member.user.username);
+      if (d.user_id === me?.id) adapters.get(d.guild_id)?.onVoiceStateUpdate(d);
+    }
+    else if (t === 'VOICE_SERVER_UPDATE') adapters.get(d.guild_id)?.onVoiceServerUpdate(d);
     else if (t === 'GUILD_DELETE') { guilds.delete(d.id); onChange(); }
     else if (t === 'MESSAGE_CREATE') {
       if (!d.author || d.author.bot || d.author.id === me?.id) return;
@@ -110,9 +127,10 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
     token = await getToken();
     if (!token) return false;
     stopped = false; connect();
+    api('GET', '/oauth2/applications/@me').then((app) => { ownerId = app?.owner?.id ?? app?.team?.owner_user_id ?? null; }).catch(() => {});
     return true;
   }
-  function stop() { stopped = true; clearInterval(beat); beat = null; try { ws?.close(1000); } catch {} ws = null; }
+  function stop() { inCall?.leave(); inCall = null; stopped = true; clearInterval(beat); beat = null; try { ws?.close(1000); } catch {} ws = null; }
 
   // ---------- where a message goes ----------
   async function channelFor(to) {
@@ -134,6 +152,36 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
     return { id: p.dm, label: `@${p.name} (DM)` };
   }
 
+  // ---------- voice calls ----------
+  // The voice library talks to Discord through this connection: it sends voice state changes here, and gets the
+  // voice server Discord picks back.
+  const adapterCreator = (guildId) => (methods) => {
+    adapters.set(guildId, methods);
+    return { sendPayload: (p) => { try { ws.send(JSON.stringify(p)); return true; } catch { return false; } }, destroy: () => adapters.delete(guildId) };
+  };
+  async function nameOf(id) {
+    if (names.has(id)) return names.get(id);
+    const g = inCall && guilds.get(inCall.guildId);
+    const m = g ? await api('GET', `/guilds/${g.id}/members/${id}`).catch(() => null) : null;
+    const n = m ? m.nick || m.user?.global_name || m.user?.username : 'someone';
+    names.set(id, n);
+    return n;
+  }
+  function voiceChannelFor(to) {
+    const gs = [...guilds.values()].map((g) => ({ name: g.name, id: g.id, channels: g.voice }));
+    if (!to) {
+      const here = ownerId && voiceOf.get(ownerId);
+      if (!here) throw new Error(`${userName} isn't in a voice channel the bot can see. Say which one, like Server/General, or join one first.`);
+      const g = guilds.get(here.guild);
+      return { guild: here.guild, channel: here.channel, label: `${g?.voice.find((c) => c.id === here.channel)?.name ?? 'the voice channel'} in ${g?.name ?? 'the server'}` };
+    }
+    const r = resolveTarget(to, gs);
+    if (r.error) throw new Error(r.error.replace('No channel #', 'No voice channel ').replace(/#/g, '').replace('discord_list shows them', 'discord_list shows the voice channels'));
+    const g = gs.find((x) => x.channels.some((c) => c.id === r.channel));
+    if (!g) throw new Error(`${to} isn't a voice channel the bot can see.`);
+    return { guild: g.id, channel: r.channel, label: (r.label ?? r.channel).replace('#', '') };
+  }
+
   const tools = [
     {
       name: 'discord_setup',
@@ -149,8 +197,28 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
         try { bot = await api('GET', '/users/@me'); app = await api('GET', '/oauth2/applications/@me').catch(() => null); }
         catch (e) { token = was; throw e; }
         await saveToken(pasted);
+        ownerId = app?.owner?.id ?? app?.team?.owner_user_id ?? null;
         stop(); stopped = false; intents = INTENTS; me = bot; connect(); onChange();
         return `Connected as ${bot.username}. To add it to ${userName}'s server, they open: ${inviteUrl(app?.id ?? bot.id)}. Friends can then DM the bot or @mention it, and you'll hear about it.`;
+      },
+    },
+    {
+      name: 'discord_call',
+      description: `Join a Discord voice channel as ${userName}'s bot, to talk with them and their friends out loud in your voice, or leave it (leave: true). With no channel it joins the one ${userName} is in now. In the call you answer when someone says your name; ${userName}'s own requests can use your tools, friends just chat with you.`,
+      parameters: z.object({ channel: z.string().max(120).optional(), leave: z.boolean().optional() }),
+      timeoutMs: 60_000,
+      execute: async ({ channel, leave }) => {
+        if (leave) { if (!inCall) return 'Not in a call.'; inCall.leave(); inCall = null; onChange(); return 'Left the call.'; }
+        if (!token || !me) throw new Error(`Discord isn't connected; discord_setup connects ${userName}'s bot.`);
+        if (!call) throw new Error('Voice calls need a Fish Audio voice: add a Fish Audio key on the Voice page first.');
+        await call.check?.();
+        const where = voiceChannelFor(channel);
+        if (inCall?.channelId === where.channel) return `Already in ${where.label}.`;
+        inCall?.leave(); inCall = null;
+        inCall = await joinCall({ guildId: where.guild, channelId: where.channel, adapterCreator: adapterCreator(where.guild), botId: me.id, ownerId, nameOf, ...call });
+        inCall.label = where.label;
+        onChange();
+        return `Joined ${where.label}. I answer when someone says my name; ${userName}'s requests can use my tools, friends just chat.${ownerId ? '' : ` (I couldn't tell which Discord account is ${userName}'s, so nobody's voice gets the tools.)`}`;
       },
     },
     {
@@ -159,7 +227,7 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
       execute: async () => {
         if (!token) return `Discord isn't set up; discord_setup connects ${userName}'s bot.`;
         const gs = [...guilds.values()];
-        const lines = gs.map((g) => `- ${g.name}: ${g.channels.map((c) => `#${c.name}`).join(', ') || 'no text channels it can see'}`);
+        const lines = gs.map((g) => `- ${g.name}: ${g.channels.map((c) => `#${c.name}`).join(', ') || 'no text channels it can see'}${g.voice?.length ? `; voice: ${g.voice.map((c) => c.name).join(', ')}` : ''}`);
         const folks = [...new Map([...people.values()].map((p) => [p.id, p.name])).values()];
         return `${me ? `Connected as ${me.username}.` : 'Connecting…'}${problem ? ` (${problem}.)` : ''}\n${lines.join('\n') || 'It isn\'t in any server yet: discord_setup gives the invite link.'}${folks.length ? `\nPeople who wrote to it: ${folks.join(', ')}` : ''}`;
       },
@@ -197,6 +265,6 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
     report: null, needs_you: null, files: [], place: null, question: null, reason: null,
   }));
   const markTold = (ids) => { for (const i of inbox) if (ids?.includes(i.id)) i.told = true; };
-  const liveText = () => (token && stopped && problem ? `Discord: not connected, ${problem}; discord_setup with a new token fixes it.` : token ? `Discord: ${me ? `connected as the bot ${me.username}, in ${guilds.size} server${guilds.size === 1 ? '' : 's'}` : 'connecting'}${problem ? ` (${problem})` : ''}. Friends' messages to it come to you as news; discord_send replies.` : '');
+  const liveText = () => (token && stopped && problem ? `Discord: not connected, ${problem}; discord_setup with a new token fixes it.` : token ? `Discord: ${me ? `connected as the bot ${me.username}, in ${guilds.size} server${guilds.size === 1 ? '' : 's'}` : 'connecting'}${problem ? ` (${problem})` : ''}. Friends' messages to it come to you as news; discord_send replies.${inCall ? ` In the voice call in ${inCall.label} now (discord_call leave to hang up).` : ''}` : '');
   return { tools, start, stop, news, markTold, liveText, dispatch };
 }

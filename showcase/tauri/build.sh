@@ -34,6 +34,13 @@ if [ "$(uname)" = "Darwin" ] && [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
   APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
   export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
 fi
+# Native Node modules shipped beside the sidecar (Discord voice's encryption) are signed as the app is: the app's
+# hardened runtime refuses to load one signed by its author (a different Team ID).
+if [ "$(uname)" = "Darwin" ]; then
+  find ../sidecar/dist/node_modules -name '*.node' -print0 | while IFS= read -r -d '' f; do
+    if [ "$APPLE_SIGNING_IDENTITY" = "-" ]; then codesign --force --sign - "$f"; else codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp "$f"; fi
+  done
+fi
 # ./build.sh release --target <triple> builds for one target (used by the release workflow).
 MODE="${1:-}"; [ $# -gt 0 ] && shift
 if [ "$MODE" = "dev" ]; then cargo build; else cargo tauri build ${TAURI_BUNDLES:+--bundles $TAURI_BUNDLES} "$@"; fi

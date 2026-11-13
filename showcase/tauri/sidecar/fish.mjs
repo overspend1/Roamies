@@ -147,3 +147,16 @@ export class FishVoice {
     this.onError?.(err);
   }
 }
+
+/** Speech to text (Fish's /v1/asr): a WAV file's words, or '' when there were none. */
+export async function fishTranscribe(key, wav, { fetchImpl = fetch, model = 'transcribe-1', timeout = 30_000 } = {}) {
+  const form = new FormData();
+  form.append('audio', new Blob([wav], { type: 'audio/wav' }), 'speech.wav');
+  form.append('ignore_timestamps', 'true');
+  const r = await fetchImpl(`${FISH_API}/v1/asr`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, model }, body: form, signal: AbortSignal.timeout(timeout) });
+  if (r.status === 401 || r.status === 403) throw new Error('The Fish Audio key was refused.');
+  if (r.status === 402) throw new Error('The Fish Audio account is out of credit for speech to text.');
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { if (j.code === 'audio_too_short') return ''; throw new Error(`Fish Audio speech to text: ${j.message ?? r.status}`); }
+  return String(j.text ?? '').replace(/<\|[^|]*\|>/g, '').trim();
+}

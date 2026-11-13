@@ -14,6 +14,9 @@ rm -rf dist && mkdir -p dist/node_modules
 # web_fetch (GG Coder's) loads its page and PDF readers by dynamic import, which a bundler can't follow: they stay
 # external and are copied below. linkedom is also bundled, because web_search imports it directly.
 WEB_EXT=(--external:@mozilla/readability --external:turndown --external:turndown-plugin-gfm --external:unpdf)
+# Discord voice calls load their library only when a call starts; it picks its codec and encryption at run time
+# (the encryption is a native module per platform), so it travels as installed too.
+WEB_EXT+=(--external:@discordjs/voice --external:prism-media --external:@snazzah/davey --external:opusscript)
 "$ES" sidekick.mjs --bundle --platform=node --format=esm --target=node22 --outfile=dist/sidekick.mjs \
   --external:@huggingface/transformers --external:ogg-opus-decoder "${WEB_EXT[@]}" \
   --banner:js="import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);" \
@@ -25,10 +28,10 @@ WEB_EXT=(--external:@mozilla/readability --external:turndown --external:turndown
   --log-level=warning
 # The readers and their dependencies, laid out as npm installed them (a nested copy travels with its parent).
 # One that's missing only costs web_fetch its Markdown: it falls back to plain text.
-node - linkedom @mozilla/readability turndown turndown-plugin-gfm unpdf <<'EOF'
+node - linkedom @mozilla/readability turndown turndown-plugin-gfm unpdf @discordjs/voice @snazzah/davey opusscript <<'EOF'
 const fs = require('node:fs'), path = require('node:path');
 const done = new Set();
-function copy(name, from) {
+function copy(name, from, optional = false) {
   for (let dir = from; ; dir = path.dirname(dir)) {
     const src = path.join(dir, 'node_modules', name);
     if (fs.existsSync(path.join(src, 'package.json'))) {
@@ -36,10 +39,11 @@ function copy(name, from) {
       done.add(name);
       fs.cpSync(src, path.join('dist/node_modules', name), { recursive: true, dereference: true });
       const pkg = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8'));
-      for (const dep of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies })) copy(dep, src);
+      for (const dep of Object.keys(pkg.dependencies ?? {})) copy(dep, src);
+      for (const dep of Object.keys(pkg.optionalDependencies ?? {})) copy(dep, src, true); // other platforms' builds aren't installed here
       return;
     }
-    if (dir === process.cwd()) return console.error(`bundle: ${name} isn't installed; web_fetch will read pages as plain text`);
+    if (dir === process.cwd()) return optional || console.error(`bundle: ${name} isn't installed`);
   }
 }
 for (const name of process.argv.slice(2)) copy(name, process.cwd());
