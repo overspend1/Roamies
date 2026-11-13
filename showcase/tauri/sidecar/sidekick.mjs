@@ -178,6 +178,9 @@ async function voiceKey(id) {
   // Linux: reading the keyring can pop up an "unlock your keyring" dialog (an auto-login desktop leaves it locked),
   // so it's only read once a key has been saved there (fishKeySaved, geminiKeySaved).
   const own = LINUX && !config[`${id}KeySaved`] ? null : await secrets.get(TTS[id].secret);
+  // Mac: a key saved by another build of Roamies (the official one, signed by someone else) asks for the Keychain
+  // password on every read; saved again once from this build, it never asks again.
+  if (own && MAC && !config[`${id}KeyOwned`]) secrets.set(TTS[id].secret, own).then(() => { config[`${id}KeyOwned`] = true; saveConfig(); }, (e) => console.error('voice key re-save', e.message));
   if (own) return [own, 'own'];
   const shared = id === 'gemini' ? await brainGeminiKey() : null;
   return shared ? [shared, 'shared'] : [null, false];
@@ -413,9 +416,14 @@ tools.push({
 // Linux: the keyring is only read once a token was saved there (reading can pop up an unlock dialog).
 // Discord voice calls: what's said there is heard with Fish's speech to text and answered in the look's Fish voice.
 // Only the user's own requests reach this chat (with its tools); friends get a side model with web search only.
+// The key the voice already holds, else one read, remembered: never a Keychain read per sentence (each can ask
+// for the Keychain password).
+let fishKeyRead = null;
 async function fishKeyOrThrow() {
-  const [key] = await voiceKey('fish').catch(() => [null]);
-  if (!key) throw new Error('Voice calls use Fish Audio: add a Fish Audio key on the Voice page first.');
+  if (tts().id === 'fish' && speech.key) return speech.key;
+  fishKeyRead ??= voiceKey('fish').then(([k]) => k).catch(() => null);
+  const key = await fishKeyRead;
+  if (!key) { fishKeyRead = null; throw new Error('Voice calls use Fish Audio: add a Fish Audio key on the Voice page first.'); }
   return key;
 }
 const callNames = () => [...new Set([lookName(), 'Roamie'])];
@@ -1511,6 +1519,7 @@ function setGeminiVoice(v) {
 async function removeVoiceKey(id = tts().id) {
   const t = TTS[id];
   if (!t) return;
+  fishKeyRead = null;
   try { await secrets.delete(t.secret); } catch { return say(`I couldn't remove the key${MAC ? ' from your Keychain' : LINUX ? ' from your keyring' : ''}. Try again in a moment.`, 'concerned'); }
   if (config[`${id}KeySaved`]) { config[`${id}KeySaved`] = false; saveConfig(); }
   ttsKeys[id] = false;
@@ -1539,7 +1548,8 @@ async function voiceKeyLogin({ provider = tts().id, thenVoice = false, given = n
     await useTts(was);
     return say(a.reason === 'key' ? `That key didn't work. Copy it again from ${t.site} and retry.` : `I couldn't reach ${t.name}. Check the connection and try again.`, 'concerned');
   }
-  try { await secrets.set(t.secret, key); config[`${t.id}KeySaved`] = true; } catch (e) {
+  fishKeyRead = null;
+  try { await secrets.set(t.secret, key); config[`${t.id}KeySaved`] = true; config[`${t.id}KeyOwned`] = true; } catch (e) {
     console.error('voice key save', e.message);
     await useTts(was);
     const p = problem('key', e, { store: KEY_STORE });

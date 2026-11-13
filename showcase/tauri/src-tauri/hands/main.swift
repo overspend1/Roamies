@@ -2102,13 +2102,14 @@ case "secret-set":
     let raw = FileHandle.standardInput.readDataToEndOfFile()
     guard let text = String(data: raw, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, text.utf8.count <= 4096 else { fail("no secret on stdin") }
     let data = Data(text.utf8)
-    var st = SecItemUpdate(secretQuery(name) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-    if st == errSecItemNotFound {
-        var add = secretQuery(name)
-        add[kSecValueData as String] = data
-        add[kSecAttrLabel as String] = "Roamies (\(name))"
-        st = SecItemAdd(add as CFDictionary, nil)
-    }
+    // Made anew rather than updated: an item keeps the access list of the app that made it, so one saved by another
+    // build (signed by someone else) would ask for the Keychain password on every read. A new one trusts this helper.
+    let gone = SecItemDelete(secretQuery(name) as CFDictionary)
+    guard gone == errSecSuccess || gone == errSecItemNotFound else { fail("keychain save failed (\(gone))") }
+    var add = secretQuery(name)
+    add[kSecValueData as String] = data
+    add[kSecAttrLabel as String] = "Roamies (\(name))"
+    let st = SecItemAdd(add as CFDictionary, nil)
     guard st == errSecSuccess else { fail("keychain save failed (\(st))") }
     out(["ok": true])
 

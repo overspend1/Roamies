@@ -297,6 +297,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     checkLocal,
     get ready() { return beats.size + beatPhrases.filter((p) => !beats.has(p) && shipped()?.has(p)).length; },
     get model() { return model; },
+    get key() { return key; },
     get on() { return localOn || !!key; },
     check,
     start,
