@@ -480,8 +480,17 @@ export function checkPageRead(app, url) {
 /** Coding agents started in Herdr (herdr.mjs): one of these known agent CLIs, working in a folder Roamies could write
  *  to (never a system or secrets folder). The agent asks its own questions, which reach the user. */
 export const CODER_KINDS = ['claude', 'codex', 'opencode', 'gemini', 'cursor', 'copilot', 'amp', 'qwen', 'kimi', 'droid'];
-export function checkCoder({ kind, cwd } = {}, home) {
+export function checkCoder({ kind, cwd, remote = false } = {}, home) {
   if (!CODER_KINDS.includes(String(kind ?? ''))) return verdict(BLOCK, `kind must be one of ${CODER_KINDS.join(', ')}.`);
+  // On a saved SSH machine its own folders count: a full path or ~, never its system or secrets folders.
+  if (remote) {
+    const d = String(cwd ?? '').trim();
+    if (!/^(~|\/)/.test(d) || /[\u0000-\u001f]/.test(d)) return verdict(BLOCK, 'Give the folder on that machine as a full path (or one starting with ~).');
+    const norm = path.normalize(d);
+    if (norm === '/' || /^\/(etc|bin|sbin|usr|boot|dev|proc|sys|lib|lib64|System|Library|private\/etc)(\/|$)/.test(norm) || /(^|\/)\.(ssh|gnupg|aws|kube|docker)(\/|$)/.test(norm))
+      return verdict(BLOCK, `Not in ${d}: that's a system or secrets folder on that machine.`);
+    return { ...verdict(SAFE), cwd: norm };
+  }
   const dir = String(cwd ?? '').replace(/^~(?=$|\/)/, home);
   if (!path.isAbsolute(dir)) return verdict(BLOCK, 'Give the folder as a full path (or one starting with ~).');
   const v = checkWrite(path.join(dir, '.roamies-coder'), home);
@@ -493,6 +502,16 @@ export function checkCoderKeys(keys) {
   if (!list.length || list.length > 6) return verdict(BLOCK, 'Give 1 to 6 keys.');
   const bad = list.find((k) => !/^(enter|esc|tab|up|down|left|right|space|y|n|[1-9])$/.test(k));
   return bad ? verdict(BLOCK, `"${bad}" isn't a key I'll press for an agent: only enter, esc, tab, arrows, space, y, n or 1 to 9.`) : { ...verdict(SAFE), keys: list };
+}
+
+/** Phone alerts (ntfy.sh): a topic is the only key to its alerts, so it must be long and hard to guess, and the alerts
+ *  only ever say which coder finished or needs an answer (herdr.mjs), never anything from a screen or a file. */
+export function checkAlertTopic(topic) {
+  const t = String(topic ?? '').trim();
+  if (!/^[A-Za-z0-9_-]{12,64}$/.test(t)) return verdict(BLOCK, 'The topic is 12 to 64 letters, digits, - or _: make it long and hard to guess, since anyone who knows it can read the alerts.');
+  // Only common words, digits and separators ("roamies-alerts", "test_2024"): easy to guess.
+  if (!t.toLowerCase().replace(/roamies|alerts?|notif(y|ications?)|tests?|phone|push|ntfy|topic|my|[\d_-]/g, '')) return verdict(BLOCK, 'That topic is easy to guess; pick something longer and random.');
+  return { ...verdict(SAFE), url: `https://ntfy.sh/${t}` };
 }
 
 /** A link the user clicked in a reply: opened in their browser, so web and mail links only (no file:, apps or scripts). */

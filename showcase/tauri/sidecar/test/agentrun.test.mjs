@@ -13,6 +13,7 @@ process.env.HOME = process.env.USERPROFILE = tmp;
 process.env.ROAMIES_DATA_DIR = path.join(tmp, 'data');
 process.env.ROAMIES_FAKE_AGENT = fileURLToPath(new URL('./fakeagent.mjs', import.meta.url));
 process.env.FAKE_LOG = path.join(tmp, 'fake.log');
+process.env.ROAMIES_NO_HERDR = '1'; // the tool list is the same with or without Herdr installed
 const { agentsRoot, createAgents } = await import('../agents.mjs');
 const { checkOpen, checkRead, checkWrite } = await import('../safety.mjs');
 

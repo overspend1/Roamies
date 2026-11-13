@@ -4,6 +4,9 @@
       "version": null,
       "date": "2026-11-13",
       "items": [
+        { "kind": "new", "title": "Coder teams", "text": "Ask for several coders side by side in Ghostty, each on its own branch if you like." },
+        { "kind": "new", "title": "Kickstart and improve", "text": "Give me an idea or a project and a coder plans, builds, tests and commits it." },
+        { "kind": "new", "title": "Reviews and phone alerts", "text": "A second coder can review the work, and I can ping your phone when one is done." },
         { "kind": "new", "title": "Terminals and coders", "text": "I run commands and coding agents like Claude Code in Herdr, shown in Ghostty." },
         { "kind": "new", "title": "Helper agents", "text": "Big jobs get split: an agent hands parts to helpers that work at the same time." },
         { "kind": "new", "title": "Agents learn", "text": "Agents leave notes on what worked, and the next agent reads them first." },

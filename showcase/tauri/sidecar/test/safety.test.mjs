@@ -436,9 +436,25 @@ console.log('safety loophole tests: passed');
   for (const [args, why] of [[{ kind: 'bash', cwd: '/Users/ken/code' }, 'not an agent CLI'], [{ kind: 'claude; rm -rf ~', cwd: '/Users/ken' }, 'no extras in the kind'],
     [{ kind: 'claude', cwd: 'code/app' }, 'a relative folder'], [{ kind: 'claude', cwd: '/Users/ken/.ssh' }, 'a secrets folder'], [{ kind: 'claude', cwd: '/System/Library' }, 'a system folder'], [{ kind: 'claude' }, 'no folder']])
     assert.equal(checkCoder(args, home).level, BLOCK, why);
+  // On a saved SSH machine: its own project folders, never its system or secrets folders.
+  for (const cwd of ['/root/app', '~/code/app', '/srv/www', '/home/pi/bot']) assert.equal(checkCoder({ kind: 'claude', cwd, remote: true }, home).level, SAFE, `remote ${cwd}`);
+  for (const cwd of ['/', '/etc', '/etc/nginx', '/usr/local', '/boot', '/root/.ssh', '~/.aws', 'code/app', '/root/../etc', '/root/a\nrm']) assert.equal(checkCoder({ kind: 'claude', cwd, remote: true }, home).level, BLOCK, `remote refused: ${JSON.stringify(cwd)}`);
+  assert.equal(checkCoder({ kind: 'bash', cwd: '/root/app', remote: true }, home).level, BLOCK, 'still only coder kinds');
   assert.deepEqual(checkCoderKeys(['Enter']).keys, ['enter']);
   assert.equal(checkCoderKeys(['down', 'down', 'enter']).level, SAFE);
   assert.equal(checkCoderKeys(['2']).level, SAFE);
   for (const keys of [[], ['rm -rf /'], ['ctrl+c'], ['yes'], ['10'], Array(7).fill('down'), 'enter', null]) assert.equal(checkCoderKeys(keys).level, BLOCK, `refused: ${JSON.stringify(keys)}`);
   console.log('coder rule tests: passed');
+}
+
+// Phone alerts: a long, hard-to-guess ntfy topic, and only ntfy.sh.
+{
+  const { checkAlertTopic, checkUrl } = await import('../safety.mjs');
+  const v = checkAlertTopic('wiktor-roamies-7f3k9q2x');
+  assert.equal(v.level, SAFE);
+  assert.equal(v.url, 'https://ntfy.sh/wiktor-roamies-7f3k9q2x');
+  assert.equal(checkUrl(v.url).level, SAFE, 'a public web address');
+  for (const t of ['short', 'roamies-alerts', 'test12345678', 'notify_2024_', 'has space in it ok', 'x/../../evil.com', 'a'.repeat(65), '', null])
+    assert.equal(checkAlertTopic(t).level, BLOCK, `refused: ${JSON.stringify(t)}`);
+  console.log('alert topic tests: passed');
 }

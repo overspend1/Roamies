@@ -9,7 +9,7 @@ import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSe
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, snapRect, toScreen } from './pointing.mjs';
 import { createHerdr, herdrDeps } from './herdr.mjs';
-import { ASK, BLOCK, checkCoder, checkCoderKeys, checkDrawAction, checkFetch, checkPageRead, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkCoder, checkCoderKeys, checkDrawAction, checkFetch, checkPageRead, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
 import { CARDS, DrawArgs, LIMITS, checkDraw, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -256,7 +256,7 @@ export function sideSearchFor(route) {
 // Every request and redirect hop of web_fetch goes through safety.mjs, by name and by the addresses it resolves to.
 export const guardFetch = async (url) => { const v = await checkFetch(url); return v.level === BLOCK ? `Blocked for safety: ${v.reason}` : null; };
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null }) {
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, notify = () => {} }) {
   // Relative paths (and run_command) start in workdir: the home folder for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   const where = workdir === HOME ? "the user's home folder" : `its working folder (${workdir})`;
@@ -1053,7 +1053,7 @@ A drawing stays until the user clears it or the window changes; your next drawin
   }
   // Herdr (herdr.mjs): terminals and coding agents that keep running, when it's installed (macOS and Linux).
   const hd = process.platform !== 'win32' ? herdrDeps({ home: HOME }) : null;
-  const herdr = hd ? createHerdr({ ...hd, safety: { classifyCommand, checkCoder, checkCoderKeys, BLOCK, ASK }, confirm, allowActions, home: HOME, userName }) : null;
+  const herdr = hd ? createHerdr({ ...hd, safety: { classifyCommand, checkCoder, checkCoderKeys, BLOCK, ASK, SAFE }, confirm, allowActions, notify, home: HOME, userName }) : null;
   if (herdr) tools.push(...herdr.tools);
   return { tools, hands, whereNow, ink: inkEvents, nextTurn: () => ++turn, herdr };
 }
