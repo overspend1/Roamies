@@ -444,6 +444,20 @@ console.log('safety loophole tests: passed');
   assert.equal(checkCoderKeys(['down', 'down', 'enter']).level, SAFE);
   assert.equal(checkCoderKeys(['2']).level, SAFE);
   for (const keys of [[], ['rm -rf /'], ['ctrl+c'], ['yes'], ['10'], Array(7).fill('down'), 'enter', null]) assert.equal(checkCoderKeys(keys).level, BLOCK, `refused: ${JSON.stringify(keys)}`);
+  // A coder's model and effort: plain model names and the known effort levels, for claude and codex only.
+  const { checkCoderModel, checkBranch, checkDiscordMessage } = await import('../safety.mjs');
+  assert.deepEqual((({ model, effort }) => ({ model, effort }))(checkCoderModel({ kind: 'claude', model: 'opus', effort: 'High' })), { model: 'opus', effort: 'high' });
+  for (const a of [{ kind: 'claude', model: 'claude-opus-5-5[1m]' }, { kind: 'codex', model: 'gpt-5.5', effort: 'xhigh' }, { kind: 'opencode' }, { kind: 'claude', model: '', effort: null }])
+    assert.equal(checkCoderModel(a).level, SAFE, JSON.stringify(a));
+  for (const a of [{ kind: 'claude', model: '--dangerously-skip-permissions' }, { kind: 'claude', model: 'opus; rm -rf ~' }, { kind: 'claude', model: 'opus --x' }, { kind: 'claude', effort: 'ultra' }, { kind: 'opencode', model: 'x' }, { kind: 'claude', model: 'a'.repeat(81) }])
+    assert.equal(checkCoderModel(a).level, BLOCK, `refused: ${JSON.stringify(a)}`);
+  // Branches to merge: plain names, never options or ranges.
+  for (const b of ['roamies/front', 'main', 'feature/login-2']) assert.equal(checkBranch(b).level, SAFE, b);
+  for (const b of ['-D', '--upload-pack=x', 'a..b', 'main;rm', 'x/', 'a b', '', 'x.lock']) assert.equal(checkBranch(b).level, BLOCK, `refused branch ${JSON.stringify(b)}`);
+  // Discord: plain messages up to 2000 characters, never pinging a whole server.
+  assert.equal(checkDiscordMessage(' see you at 8 ').text, 'see you at 8');
+  for (const t of ['', '   ', 'x'.repeat(2001), 'hey @everyone', '@here look', 'ping <@&123456>']) assert.equal(checkDiscordMessage(t).level, BLOCK, `refused message ${JSON.stringify(t.slice(0, 20))}`);
+  assert.equal(checkDiscordMessage('hi <@1234567>').level, SAFE, 'pinging one friend is fine');
   console.log('coder rule tests: passed');
 }
 

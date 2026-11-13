@@ -396,7 +396,7 @@ async function* claudeCodeLoop(messages, o) {
 
   // A warm spare if one was started for exactly this; else (or if it turns out dead) a fresh process.
   const link = { signal: o.signal, onEvent: (event) => channel.push({ kind: 'event', event }), stderr: (d) => { stderrTail = (stderrTail + d).slice(-STDERR_TAIL_CHARS); } };
-  let run, input, q, warmUsed = false;
+  let run, input, q, warmUsed = false, arrived = 0;
   const begin = async (s) => {
     const fresh = {};
     run = s ?? { link: fresh, ...sdkOptions(o, o.resume, fresh) };
@@ -408,7 +408,7 @@ async function* claudeCodeLoop(messages, o) {
     q = w ? w.query(input) : (o.query ?? sdkQuery)({ prompt: input, options: run.options });
     if (aborted) { input.end(); q.interrupt().catch(() => {}); }
     let seen = false;
-    try { for await (const message of q) { seen = true; channel.push({ kind: 'sdk', message }); } channel.push({ kind: 'end' }); }
+    try { for await (const message of q) { seen = true; channel.push({ kind: 'sdk', message, n: ++arrived }); } channel.push({ kind: 'end' }); }
     catch (error) {
       if (warmUsed && !seen && !aborted) { try { q.close(); } catch {} return begin(null); } // the spare died while parked
       channel.push({ kind: 'error', error });
@@ -416,6 +416,12 @@ async function* claudeCodeLoop(messages, o) {
   };
   const mapper = new SdkMessageMapper({ messages, takeResult: (id) => run.bridge.takeResult(id), onSessionId: o.onSessionId, onRateLimit: o.onRateLimit });
   void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
+  // A message sent while it works joins this run: Claude Code takes it in at its next step, in the same turn. It goes
+  // into the history just before the reply that follows it (never between a tool call and its result).
+  // Each is placed by what Claude Code had sent when it went in (arrived), not by how far this loop has read.
+  const steered = [];
+  o.bindSteer?.((content) => { if (aborted || !input) return false; steered.push({ msg: { role: 'user', content }, at: arrived }); input.push(toSdkUserMessage(toSdkUserContent(content))); return true; });
+  const placeSteered = (n) => { while (steered.length && steered[0].at < n) messages.push(steered.shift().msg); };
 
   let killTimer;
   const onAbort = () => {
@@ -440,7 +446,9 @@ async function* claudeCodeLoop(messages, o) {
       const message = item.message;
       // After Stop, keep the transcript in step until Claude Code reports the interrupted result, but stop emitting.
       if (aborted) { if (message.type === 'result') break; mapper.handle(message); continue; }
+      if (message.type === 'assistant' && !message.parent_tool_use_id) placeSteered(item.n);
       if (message.type !== 'result') { yield* mapper.handle(message); continue; }
+      if (message.subtype === 'success' && steered.length) continue; // sent too late for this turn: its own turn follows
       if (message.subtype === 'error_max_turns') { hitMaxTurns = true; break; }
       if (message.subtype !== 'success') {
         const detail = (message.errors ?? []).join('\n') || mapper.syntheticError || stderrTail.trim();
@@ -450,6 +458,8 @@ async function* claudeCodeLoop(messages, o) {
       break;
     }
   } finally {
+    o.bindSteer?.(null);
+    placeSteered(Infinity);
     o.signal?.removeEventListener('abort', onAbort);
     input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
@@ -490,6 +500,11 @@ export class ClaudeCodeAgent {
     this.messages = [...(options.system ? [{ role: 'system', content: options.system }] : []), ...(options.priorMessages ?? [])];
   }
   getMessages() { return [...this.messages]; }
+  #steer = null;
+  get running() { return this.#running; }
+  /** A message from the user while a reply is running: it joins that run instead of stopping it. → false if no run
+   *  can take it (none running, or it's stopping). */
+  steer(msg) { return !!this.#steer?.(msg?.content ?? msg); }
   /** keepWarm only: start a Claude Code process now for the next prompt, so it doesn't wait for one to start. */
   warm() {
     if (!this.options.keepWarm || this.#running) return;
@@ -512,6 +527,7 @@ export class ClaudeCodeAgent {
     try {
       return yield* claudeCodeLoop(loopMsgs, {
         ...o, resume,
+        bindSteer: (fn) => { this.#steer = fn; },
         onSessionId: (id) => { sessionId = id; },
         onRateLimit: o.onRateLimit ?? ((info) => void recordClaudeCodeRateLimit(info).catch(() => {})),
       });

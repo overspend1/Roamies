@@ -9,7 +9,7 @@ import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSe
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, snapRect, toScreen } from './pointing.mjs';
 import { createHerdr, herdrDeps } from './herdr.mjs';
-import { ASK, BLOCK, SAFE, checkCoder, checkCoderKeys, checkDrawAction, checkFetch, checkPageRead, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
+import { ASK, BLOCK, SAFE, checkCoder, checkCoderKeys, checkCoderModel, checkBranch, checkDrawAction, checkFetch, checkPageRead, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
 import { CARDS, DrawArgs, LIMITS, checkDraw, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
@@ -1053,7 +1053,7 @@ A drawing stays until the user clears it or the window changes; your next drawin
   }
   // Herdr (herdr.mjs): terminals and coding agents that keep running, when it's installed (macOS and Linux).
   const hd = process.platform !== 'win32' ? herdrDeps({ home: HOME }) : null;
-  const herdr = hd ? createHerdr({ ...hd, safety: { classifyCommand, checkCoder, checkCoderKeys, BLOCK, ASK, SAFE }, confirm, allowActions, notify, home: HOME, userName }) : null;
+  const herdr = hd ? createHerdr({ ...hd, safety: { classifyCommand, checkCoder, checkCoderKeys, checkCoderModel, checkBranch, BLOCK, ASK, SAFE }, confirm, allowActions, notify, home: HOME, userName }) : null;
   if (herdr) tools.push(...herdr.tools);
   return { tools, hands, whereNow, ink: inkEvents, nextTurn: () => ++turn, herdr };
 }

@@ -51,6 +51,11 @@ assert.match(show, /draw it without being asked/, 'explaining draws by itself');
 assert.match(show, /whenever what you say is about something on their screen[^.]*, mark it with draw while you say it, even when they didn't ask where it is/, 'pointing at what it talks about is the default');
 assert.match(show, /Explaining code: a code card with focus[^.]*\. A layout[^:]*: a sketch\./, 'the code and sketch cards have their questions');
 assert.match(side, /for a web page in their browser, read_page gets all of it, also what's scrolled out of view/, 'whole pages are read with read_page');
+// Typed while a reply runs: it joins that run (steering) instead of stopping it; a picture still starts over.
+assert.match(side, /if \(interrupt && busy && !image && steer\(text\)\) return running;\n  if \(interrupt && busy\) interruptQuietly/, 'steering comes before interrupting');
+assert.match(side, /tools: tools\.map\(\(t\) => \(\{ \.\.\.t, interruptible: t\.interruptible \?\? false \}\)\)/, 'a steer never cuts a tool off halfway');
+assert.match(side, /start_project for a whole goal worked on in rounds by itself/, 'projects are offered');
+assert.match(side, /never ask for the token in the chat/, 'the Discord token never goes through the chat');
 assert.match(show, /Don't draw for a quick fact[^.]*, an opinion or advice, small talk, a yes or no, anything they asked for in one line or one sentence, or when they say not to: those are just said\./, 'what stays plain speech');
 // Regression: the voice style said explanations are "spoken, not put on screen", which argued against drawing them.
 assert.ok(!/an explanation, advice\) is spoken, not put on screen/.test(side), 'the voice style no longer keeps explanations off the screen');

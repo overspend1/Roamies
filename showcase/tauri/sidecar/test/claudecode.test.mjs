@@ -121,6 +121,36 @@ assert.deepEqual(stopTypes, ['agent_done']);
 assert.equal(stopper.calls.interrupts, 1, 'Claude Code is interrupted');
 assert.equal(stopped.getMessages().at(-1).content[0].isError, true, 'the open tool call is closed');
 
+// Steering: a message sent mid-run joins it (Claude Code takes it in, same turn); in the history it sits before the
+// reply that follows it, never between a tool call and its result. One sent after the last reply waits for its own.
+{
+  let steerAt = null;
+  const steerRun = fakeQuery(async function* (ctx) {
+    await ctx.nextInput();
+    yield { type: 'assistant', parent_tool_use_id: null, message: { id: 's1', model: 'm', content: [{ type: 'tool_use', id: 't1', name: 'mcp__gg__read_file', input: { path: 'a' } }] } };
+    steerAt?.();
+    const more = await ctx.nextInput();
+    assert.equal(more.message.content[0].text, 'also say hi', 'the message reaches Claude Code as a user message');
+    yield { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'pancake' }] }] } };
+    yield { type: 'assistant', parent_tool_use_id: null, message: { id: 's2', model: 'm', content: [{ type: 'text', text: 'Pancake. Hi!' }] } };
+    steerAt?.();
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'Pancake. Hi!' };
+    await ctx.nextInput();
+    yield { type: 'assistant', parent_tool_use_id: null, message: { id: 's3', model: 'm', content: [{ type: 'text', text: 'Bye too.' }] } };
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'Bye too.' };
+  });
+  const sa = new ClaudeCodeAgent({ model: 'm', system: 's', tools: [readFile], executable: '/bin/claude', cwd: '/', env: {}, query: steerRun.query, onRateLimit: () => {} });
+  assert.equal(sa.steer({ role: 'user', content: 'x' }), false, 'nothing running: no steering');
+  const said = ['also say hi', 'and bye'];
+  steerAt = () => assert.equal(sa.steer({ role: 'user', content: said.shift() }), true);
+  let text = '';
+  for await (const e of agentEvents(sa.prompt('read a'))) if (e.type === 'text_delta') text += e.text;
+  assert.equal(sa.running, false);
+  const roles = sa.getMessages().slice(1).map((m) => [m.role, typeof m.content === 'string' ? m.content : m.content.map((c) => c.type).join(',')]);
+  assert.deepEqual(roles, [['user', 'read a'], ['assistant', 'tool_call'], ['tool', 'tool_result'], ['user', 'also say hi'], ['assistant', 'text'], ['user', 'and bye'], ['assistant', 'text']]);
+  assert.equal(sa.getMessages().at(-1).content[0].text, 'Bye too.', 'the late message got its own reply in the same run');
+}
+
 // Warm spare: once a run ends, the next one's Claude Code is started ahead (same options, the session to resume)
 // and the next prompt takes it instead of starting one; its tools still go through our bridge.
 {

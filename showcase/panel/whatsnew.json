@@ -4,6 +4,10 @@
       "version": null,
       "date": "2026-11-13",
       "items": [
+        { "kind": "new", "title": "Projects in rounds", "text": "A lead coder splits your goal, a team builds it, and their branches get merged." },
+        { "kind": "new", "title": "Model and effort", "text": "Each coder gets the model and effort its part needs, from haiku to opus." },
+        { "kind": "new", "title": "Talk while I work", "text": "Type while I'm busy and I take it in and carry on, instead of starting over." },
+        { "kind": "new", "title": "Discord", "text": "Connect your own bot: friends' messages reach me, and I send your replies." },
         { "kind": "new", "title": "Coder teams", "text": "Ask for several coders side by side in Ghostty, each on its own branch if you like." },
         { "kind": "new", "title": "Kickstart and improve", "text": "Give me an idea or a project and a coder plans, builds, tests and commits it." },
         { "kind": "new", "title": "Reviews and phone alerts", "text": "A second coder can review the work, and I can ping your phone when one is done." },

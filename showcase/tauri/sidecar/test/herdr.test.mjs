@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHerdr, exitOf, findHerdr, liveCodersText, marker, SESSION, tailOf, withMarker } from '../herdr.mjs';
-import { ASK, BLOCK, SAFE, checkCoder, checkCoderKeys, classifyCommand } from '../safety.mjs';
+import { ASK, BLOCK, SAFE, checkBranch, checkCoder, checkCoderKeys, checkCoderModel, classifyCommand } from '../safety.mjs';
 
 // The end marker: on its own line with the exit code; a command's ";" or "&" ending still runs.
 const m = marker('t1');
@@ -33,6 +33,7 @@ async function run(bin, args) {
   if (bin === 'git' || bin === 'mkdir') {
     fake.calls.push([bin, ...args]);
     if (bin === 'mkdir') { fs.mkdirSync(args.at(-1), { recursive: true }); return { code: 0, stdout: '', stderr: '' }; }
+    if (args.includes('--verify')) return { code: 1, stdout: '', stderr: '' }; // no such branch yet
     if (args.includes('rev-parse')) return fs.existsSync(path.join(args[1], '.git')) ? { code: 0, stdout: `${args[1]}\n`, stderr: '' } : { code: 128, stdout: '', stderr: 'not a git repository' };
     if (args.includes('worktree')) { fs.mkdirSync(args.at(-1), { recursive: true }); return { code: 0, stdout: '', stderr: '' }; }
     if (args.includes('init')) { fs.mkdirSync(path.join(args[1], '.git'), { recursive: true }); return { code: 0, stdout: '', stderr: '' }; }
@@ -79,7 +80,12 @@ async function run(bin, args) {
     for (const x of fake.agents.values()) if (x.finishIn > 0 && --x.finishIn === 0) Object.assign(x, { status: 'idle', screen: x.finalScreen });
     return ok({ agents: [...fake.agents].map(([name, x]) => ({ name, agent_status: x.status })) });
   }
-  if (a === 'agent' && b === 'read') return { code: 0, stdout: fake.agents.get(rest[0]).screen, stderr: '' };
+  if (a === 'agent' && b === 'read') {
+    // Like the real one: a blocked agent's history can't be read, only its visible screen.
+    const x = fake.agents.get(rest[0]);
+    if (x.status === 'blocked' && rest.includes('recent-unwrapped')) return fail('agent_read_unavailable', `cannot read 40 lines while ${rest[0]} is blocked: its alternate-screen history can only be captured by scrolling while idle. Wait and retry, or use --source visible`);
+    return { code: 0, stdout: x.screen, stderr: '' };
+  }
   if (a === 'agent' && b === 'prompt') { const x = fake.agents.get(rest[0]); x.prompts.push(rest[1]); x.status = 'working'; if (fake.finishNext) { Object.assign(x, fake.finishNext); fake.finishNext = null; } return ok({}); }
   if (a === 'agent' && b === 'send-keys') { fake.agents.get(rest[0]).keys.push(rest.slice(1)); return ok({}); }
   return fail('unknown', `fake herdr: ${args.join(' ')}`);
@@ -89,7 +95,7 @@ const runCwd = async (bin, args, o) => { const r = await run(bin, args, o); cons
 let allow = true, asked = [], answer = true;
 const hd = createHerdr({
   bin: '/x/herdr', run: runCwd, spawnServer: () => { fake.spawned++; fake.server = true; },
-  safety: { classifyCommand, checkCoder, checkCoderKeys, BLOCK, ASK, SAFE }, confirm: async (q) => { asked.push(q); return answer; },
+  safety: { classifyCommand, checkCoder, checkCoderKeys, checkCoderModel, checkBranch, BLOCK, ASK, SAFE }, confirm: async (q) => { asked.push(q); return answer; },
   allowActions: () => allow, openTerminal: async (c) => { fake.opened = c; }, home, userName: 'Ken', pollMs: 1e9, wait: async () => {},
 });
 const tool = (name) => hd.tools.find((t) => t.name === name);
@@ -123,7 +129,7 @@ assert.match(await tool('terminal_read').execute({ target: 'w1:p3' }), /building
 for (let i = 0; i < 4; i++) await tool('terminal_run').execute({ command: 'ls' });
 assert.deepEqual(fake.closed, ['w1:t1'], 'the oldest finished tab closed; running ones never do');
 // After a restart, the Roamies workspace is found again, not made anew.
-const again = createHerdr({ bin: '/x/herdr', run: runCwd, spawnServer: () => {}, safety: { classifyCommand, checkCoder, checkCoderKeys, BLOCK, ASK, SAFE }, confirm: async () => true, allowActions: () => true, openTerminal: async () => {}, home, pollMs: 1e9, wait: async () => {} });
+const again = createHerdr({ bin: '/x/herdr', run: runCwd, spawnServer: () => {}, safety: { classifyCommand, checkCoder, checkCoderKeys, checkCoderModel, checkBranch, BLOCK, ASK, SAFE }, confirm: async () => true, allowActions: () => true, openTerminal: async () => {}, home, pollMs: 1e9, wait: async () => {} });
 await again.tools.find((t) => t.name === 'terminal_run').execute({ command: 'ls' });
 assert.equal(fake.ws, 1, 'one Roamies workspace across restarts');
 again.stop();
@@ -173,6 +179,9 @@ assert.match(hd.liveText(), /- claude \(claude in .*new\): working/);
 // Names stay unique; an exited agent is news; kinds and folders are checked.
 await tool('start_coder').execute({ kind: 'codex', cwd: '~/code/app', task: 'Review.', name: 'fixer' });
 assert.ok(hd.coders.has('fixer-2'), 'a second fixer gets its own name');
+fake.agents.set('restored', { status: 'idle', screen: '', prompts: [], keys: [], args: [] }); // brought back by Herdr after a restart
+await tool('start_coder').execute({ kind: 'claude', cwd: '~/code/app', task: 'x', name: 'restored' });
+assert.ok(hd.coders.has('restored-2'), 'a name Herdr already has is never reused');
 fake.agents.delete('fixer-2');
 await hd.poll();
 assert.deepEqual(hd.news().map((i) => [i.id, i.kind, i.reason]), [['fixer-2', 'failed', 'the agent exited']]);
@@ -191,7 +200,7 @@ hd.stop();
   let T = 1_000_000;
   const alerts = [];
   const h2 = createHerdr({
-    bin: '/x/herdr', run: runCwd, spawnServer: () => { fake.server = true; }, safety: { classifyCommand, checkCoder, checkCoderKeys, BLOCK, ASK, SAFE },
+    bin: '/x/herdr', run: runCwd, spawnServer: () => { fake.server = true; }, safety: { classifyCommand, checkCoder, checkCoderKeys, checkCoderModel, checkBranch, BLOCK, ASK, SAFE },
     confirm: async (q) => { asked.push(q); return true; }, allowActions: () => true, openTerminal: async (c) => { fake.opened = c; }, notify: (t) => alerts.push(t),
     home, userName: 'Ken', pollMs: 1, wait: async () => {}, now: () => T,
   });
@@ -288,6 +297,135 @@ hd.stop();
   assert.deepEqual([res.name, res.state, res.screen], ['bg', 'done', 'Page made.']);
   assert.ok(!h2.news().some((i) => i.id === 'bg'), 'its agent already has the result: no chat news');
   h2.stop();
+}
+
+// ---- model and effort, plans, and projects: a lead plans, a team builds on branches, Roamies merges, round after round ----
+{
+  const { coderArgs, parsePlan, teamBrief, NEXT_FILE, RECIPES } = await import('../herdr.mjs');
+  const { execFile } = await import('node:child_process');
+  // Each coder's command line carries the model and effort picked for its part.
+  assert.deepEqual(coderArgs('claude', { model: 'opus', effort: 'xhigh' }), ['--permission-mode', 'acceptEdits', '--model', 'opus', '--effort', 'xhigh']);
+  assert.deepEqual(coderArgs('codex', { model: 'gpt-5.5', effort: 'max' }), ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', '-m', 'gpt-5.5', '-c', 'model_reasoning_effort=xhigh'], 'codex tops out at xhigh');
+  assert.deepEqual(coderArgs('claude'), ['--permission-mode', 'acceptEdits']);
+  assert.deepEqual(coderArgs('opencode', {}), []);
+  // The lead's plan, checked before anything starts.
+  const kinds = ['claude', 'codex'];
+  const plan = parsePlan('```json\n{"done": false, "summary": "s", "parts": [{"name": "API!", "task": "t", "model": "sonnet", "effort": "Medium"}, {"name": "ui", "task": "u", "kind": "codex"}]}\n```', { kinds, checkModel: checkCoderModel });
+  assert.deepEqual(plan.parts.map((p) => [p.name, p.kind, p.model, p.effort]), [['api', 'claude', 'sonnet', 'medium'], ['ui', 'codex', null, null]]);
+  assert.deepEqual(parsePlan('{"done": true, "summary": "built"}', { kinds }), { done: true, summary: 'built', parts: [] });
+  for (const [text, why] of [['nope', /isn't valid JSON/], ['{"done": false}', /has no parts/], ['{"done": false, "parts": [{"name": "a", "task": "t", "kind": "bash"}]}', /kind must be one of claude, codex/],
+    ['{"done": false, "parts": [{"name": "a", "task": "t", "effort": "ultra"}]}', /effort is one of/], ['{"done": false, "parts": [{"name": "a", "task": "t"}, {"name": "A", "task": "u"}]}', /names must differ/],
+    ['{"done": false, "parts": [{"name": "a", "task": "t", "model": "--dangerously-skip-permissions"}]}', /isn't a model name/], [`{"done": false, "parts": ${JSON.stringify(Array(7).fill({ name: 'a', task: 't' }))}}`, /doesn't match the format/]])
+    assert.match(parsePlan(text, { kinds, checkModel: checkCoderModel }).error, why);
+  assert.match(teamBrief('a shop', 'api', [{ name: 'api', task: 'API' }, { name: 'ui', task: 'The UI\nmore' }]), /one of 2 coding agents .* a shop\nThe others: ui: The UI\.\n/);
+
+  // A real repo: the merges are real git.
+  const sh = (cwd, ...args) => new Promise((res, rej) => execFile('git', ['-C', cwd, ...args], (e, so) => (e ? rej(e) : res(String(so).trim()))));
+  const repo = path.join(home, 'code', 'shop');
+  fs.mkdirSync(repo, { recursive: true });
+  await sh(repo, 'init', '-q', '-b', 'main'); await sh(repo, 'config', 'user.name', 'Ken'); await sh(repo, 'config', 'user.email', 'ken@example.com');
+  fs.writeFileSync(path.join(repo, 'app.txt'), 'base\n'); await sh(repo, 'add', '-A'); await sh(repo, 'commit', '-q', '-m', 'base');
+  const real = (bin, args, o) => (bin === 'git' || bin === 'sh' ? new Promise((res) => execFile(bin, args, { timeout: o?.timeout }, (e, so, se) => res({ code: e ? (typeof e.code === 'number' ? e.code : 1) : 0, stdout: String(so), stderr: String(se) }))) : runCwd(bin, args, o));
+  asked = []; answer = true;
+  const alerts = [];
+  const h3 = createHerdr({ bin: '/x/herdr', run: real, spawnServer: () => { fake.server = true; }, safety: { classifyCommand, checkCoder, checkCoderKeys, checkCoderModel, checkBranch, BLOCK, ASK, SAFE },
+    confirm: async (q) => { asked.push(q); return answer; }, allowActions: () => true, openTerminal: async () => {}, notify: (t) => alerts.push(t), home, userName: 'Ken', kinds, pollMs: 1e9, wait: async () => {} });
+  const t3 = (name) => h3.tools.find((t) => t.name === name);
+  const until = async (cond, what) => { for (let i = 0; i < 300 && !cond(); i++) await new Promise((r) => setTimeout(r, 10)); assert.ok(cond(), what); };
+  const finishAgent = async (name, screen = 'done') => { Object.assign(fake.agents.get(name), { status: 'idle', screen }); await h3.poll(); };
+  const p = () => h3.projects.get('shop');
+
+  out = await t3('start_project').execute({ folder: '~/code/shop', goal: 'A shop with an API and a UI.', rounds: 2 });
+  assert.match(out, /^Project shop started in .*code\/shop, on branch roamies\/shop-lead: its lead is planning the first round\. It goes up to 2 rounds by itself/);
+  const leadDir = path.join(home, '.herdr', 'worktrees', 'shop', 'roamies-shop-lead');
+  const lead = fake.agents.get('shop-lead');
+  assert.equal(lead.cwd, leadDir, 'the lead works on its own worktree');
+  assert.deepEqual(lead.args.slice(-2), ['--effort', 'high'], 'the lead thinks hard by default');
+  assert.match(lead.prompts[0], /^You lead a team of coding agents on this project\. The goal: A shop with an API and a UI\./);
+  assert.match(lead.prompts[0], /model opus for the hardest design work .* effort is low, medium, high, xhigh or max/);
+  assert.match(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8'), new RegExp(NEXT_FILE), 'the plan file is never committed');
+  assert.match(h3.liveText(), /Projects \(names for tell_project and stop_project\):\n- shop: round 1 of up to 2, its lead is planning; goal: A shop/);
+  // A broken plan is sent back once to fix; a good one starts the team, each with the model and effort it was given.
+  fs.writeFileSync(path.join(leadDir, NEXT_FILE), '{"done": false}');
+  await finishAgent('shop-lead');
+  await until(() => lead.prompts.length === 2, 'the lead is asked to fix its plan');
+  assert.match(lead.prompts[1], /has no parts/);
+  fs.writeFileSync(path.join(leadDir, NEXT_FILE), JSON.stringify({ done: false, summary: 'API and UI', parts: [{ name: 'api', task: 'Build the API in api.txt.', model: 'sonnet', effort: 'medium' }, { name: 'ui', task: 'Build the UI in ui.txt.', kind: 'codex', effort: 'high' }] }));
+  await finishAgent('shop-lead');
+  await until(() => p().phase === 'working', 'round 1 starts');
+  assert.deepEqual(p().members, ['shop-api', 'shop-ui']);
+  const api = fake.agents.get('shop-api'), ui = fake.agents.get('shop-ui');
+  assert.deepEqual(api.args.slice(-4), ['--model', 'sonnet', '--effort', 'medium']);
+  assert.deepEqual(ui.args.slice(-2), ['-c', 'model_reasoning_effort=high']);
+  assert.match(api.prompts[0], /^Build the API in api\.txt\.\n\n\(You're one of 2 coding agents .*The others: ui: Build the UI/s);
+  assert.equal(await sh(api.cwd, 'rev-parse', 'HEAD'), await sh(leadDir, 'rev-parse', 'HEAD'), 'teammates branch from the lead\'s branch');
+  let nw = h3.news();
+  assert.match(nw.find((i) => i.id === 'project:shop').outcome, /^round 1 of up to 2 started: API and UI\. shop-api \(claude, sonnet, medium effort\), shop-ui \(codex, high effort\)$/);
+  h3.markTold(['project:shop']);
+  assert.match(h3.liveText(), /- shop-api \(claude \(sonnet, medium effort\) in .*roamies-shop-api on branch roamies\/shop-api, team member of project shop\): working/);
+  // Ken adds something while they work: the team gets it now, the lead with its next check.
+  assert.match(await t3('tell_project').execute({ name: 'shop', message: 'Use dark colours.' }), /^Sent to shop-api, shop-ui now\. Its lead gets it when it checks this round\.$/);
+  assert.equal(ui.prompts.at(-1), 'Ken adds, for the whole team: Use dark colours.');
+  // Each finishes (without committing): their work is committed and merged, and the lead checks it.
+  fs.writeFileSync(path.join(api.cwd, 'api.txt'), 'api\n');
+  fs.writeFileSync(path.join(ui.cwd, 'ui.txt'), 'ui\n');
+  await finishAgent('shop-api', 'API done.');
+  assert.equal(p().phase, 'working', 'waits for the whole team');
+  assert.deepEqual(h3.news(), [], 'a teammate finishing is no news by itself');
+  await finishAgent('shop-ui', 'UI done.');
+  await until(() => p().phase === 'checking', 'merged, the lead checks');
+  assert.ok(fs.existsSync(path.join(leadDir, 'api.txt')) && fs.existsSync(path.join(leadDir, 'ui.txt')), 'both merged into the lead\'s branch');
+  assert.match(lead.prompts.at(-1), /^Round 1 of 2 is done\. Their branches are merged into this branch\.\nThe user added: Use dark colours\.\n\nRun the tests/);
+  assert.match(lead.prompts.at(-1), /If more is needed for the goal, plan the next round/);
+  // Round 2: two parts that clash; the second merge's conflict goes to the lead to resolve.
+  fs.writeFileSync(path.join(leadDir, NEXT_FILE), JSON.stringify({ done: false, summary: 'polish', parts: [{ name: 'c', task: 'Change app.txt to c.' }, { name: 'd', task: 'Change app.txt to d.' }] }));
+  await finishAgent('shop-lead');
+  await until(() => p().phase === 'working' && p().round === 2, 'round 2 starts');
+  assert.ok(fake.closed.includes(h3.projects.get('shop').tab) === false && fake.closed.length > 0, 'the last round\'s tab closed');
+  h3.markTold(['project:shop']);
+  fs.writeFileSync(path.join(fake.agents.get('shop-c').cwd, 'app.txt'), 'c\n');
+  fs.writeFileSync(path.join(fake.agents.get('shop-d').cwd, 'app.txt'), 'd\n');
+  await finishAgent('shop-c'); await finishAgent('shop-d');
+  await until(() => p().phase === 'checking', 'round 2 merged as far as it goes');
+  assert.match(lead.prompts.at(-1), /^Round 2 of 2 is done\. Merging roamies\/shop-d hit conflicts \(git status shows them\)\./);
+  assert.match(lead.prompts.at(-1), /This was the last round/);
+  fs.writeFileSync(path.join(leadDir, 'app.txt'), 'c and d\n'); await sh(leadDir, 'add', '-A'); await sh(leadDir, 'commit', '-q', '--no-edit');
+  fs.writeFileSync(path.join(leadDir, NEXT_FILE), '{"done": true, "summary": "a shop with an API and a UI"}');
+  await finishAgent('shop-lead');
+  await until(() => p().phase === 'done', 'the project ends');
+  nw = h3.news().find((i) => i.id === 'project:shop');
+  assert.match(nw.outcome, /^done after 2 rounds: a shop with an API and a UI\. Everything is on branch roamies\/shop-lead/);
+  assert.ok(alerts.some((a) => a.startsWith('Project shop: done after 2 rounds')), 'a phone alert');
+  assert.equal(h3.liveText().includes('Projects'), false, 'an ended project leaves the live state');
+  // Landing it in Ken's checkout: never over uncommitted changes, and only with a yes.
+  fs.writeFileSync(path.join(repo, 'app.txt'), 'mine\n');
+  await assert.rejects(t3('land_work').execute({ repo: '~/code/shop', branch: 'roamies/shop-lead' }), /uncommitted changes/);
+  await sh(repo, 'checkout', '-q', '--', 'app.txt');
+  await assert.rejects(t3('land_work').execute({ repo: '~/code/shop', branch: '--upload-pack=x' }), /isn't a branch name/);
+  answer = false;
+  await assert.rejects(t3('land_work').execute({ repo: '~/code/shop', branch: 'roamies/shop-lead' }), /Ken said no/);
+  answer = true;
+  assert.match(asked.at(-1), /^Merge roamies\/shop-lead \(\d+ commits\) into main in shop\?$/);
+  assert.equal(await t3('land_work').execute({ repo: '~/code/shop', branch: 'roamies/shop-lead' }), 'Merged roamies/shop-lead into main.');
+  assert.equal(fs.readFileSync(path.join(repo, 'app.txt'), 'utf8'), 'c and d\n');
+  assert.ok(fs.existsSync(path.join(repo, 'api.txt')) && !fs.existsSync(path.join(repo, NEXT_FILE)), 'the work landed, the plan file never did');
+  // merge_work: branches joined on a new branch; a conflict goes to a coder to resolve.
+  out = await t3('merge_work').execute({ repo: '~/code/shop', branches: ['roamies/shop-api', 'roamies/shop-ui'], name: 'both' });
+  assert.match(out, /^Merged nothing new \(roamies\/shop-api, roamies\/shop-ui had nothing new\) into branch roamies\/both/, 'already in main');
+  for (const b of ['x', 'y', 'z']) { await sh(repo, 'checkout', '-q', '-b', b, 'main'); fs.writeFileSync(path.join(repo, 'app.txt'), `${b}\n`); await sh(repo, 'commit', '-q', '-am', b); }
+  await sh(repo, 'checkout', '-q', 'main');
+  out = await t3('merge_work').execute({ repo: '~/code/shop', branches: ['x', 'y', 'z'], name: 'xyz' });
+  assert.match(out, /^Merged x; merging y hit conflicts, so xyz-fix is resolving it in .*roamies-xyz \(branch roamies\/xyz\) and will merge the rest\./);
+  assert.match(fake.agents.get('xyz-fix').prompts[0], /Already merged: x\. Merging y hit conflicts .* git merge --no-ff z\b/s);
+  assert.equal(await sh(repo, 'status', '--porcelain'), '', 'Ken\'s checkout untouched');
+  assert.deepEqual(fake.agents.get('xyz-fix').args.slice(-2), ['--effort', 'high']);
+  await assert.rejects(t3('merge_work').execute({ repo: '~/code/shop', branches: ['-D'] }), /isn't a branch name/);
+  await assert.rejects(t3('start_project').execute({ folder: '~/code/nope', goal: 'x' }), /doesn't exist/);
+  await assert.rejects(t3('start_coder').execute({ kind: 'claude', cwd: '~/code/shop', task: 'x', model: 'opus --bad' }), /isn't a model name/);
+  // Parts given up front: the team starts at once and the lead checks their work.
+  out = await t3('start_project').execute({ folder: '~/code/shop', goal: 'Docs.', name: 'docs', rounds: 1, parts: [{ name: 'readme', task: 'Write README.' }, { name: 'guide', task: 'Write GUIDE.' }] });
+  assert.match(out, /^Project docs started .*: the team is working \(docs-readme, docs-guide\)\./);
+  h3.stop();
 }
 fs.rmSync(home, { recursive: true, force: true });
 console.log('herdr tests: passed');

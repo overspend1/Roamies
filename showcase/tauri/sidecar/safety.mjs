@@ -496,6 +496,32 @@ export function checkCoder({ kind, cwd, remote = false } = {}, home) {
   const v = checkWrite(path.join(dir, '.roamies-coder'), home);
   return v.level === BLOCK ? verdict(BLOCK, `Not in ${cwd}: ${v.reason}`) : { ...verdict(SAFE), cwd: path.resolve(dir) };
 }
+/** A coder's model and effort, passed to its command line: a model name only (no spaces or options) and one of the
+ *  effort levels. Only Claude Code and Codex take them. → { model, effort } (null when left out) */
+export const CODER_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export function checkCoderModel({ kind, model, effort } = {}) {
+  const m = model == null || model === '' ? null : String(model).trim(), e = effort == null || effort === '' ? null : String(effort).trim().toLowerCase();
+  if ((m || e) && !['claude', 'codex'].includes(String(kind))) return verdict(BLOCK, `Only claude and codex coders take a model or effort; leave them out for ${kind}.`);
+  if (m && !/^[A-Za-z0-9][\w.:/@#[\]-]{0,79}$/.test(m)) return verdict(BLOCK, `"${m}" isn't a model name (like opus, sonnet, haiku or gpt-5.5).`);
+  if (e && !CODER_EFFORTS.includes(e)) return verdict(BLOCK, `effort is one of ${CODER_EFFORTS.join(', ')}.`);
+  return { ...verdict(SAFE), model: m, effort: e };
+}
+/** A git branch to merge: a plain name, never an option (a leading -) or a range. */
+export function checkBranch(name) {
+  const b = String(name ?? '').trim();
+  if (!/^[\w][\w./-]{0,99}$/.test(b) || b.includes('..') || b.endsWith('/') || b.endsWith('.lock')) return verdict(BLOCK, `"${b}" isn't a branch name.`);
+  return { ...verdict(SAFE), branch: b };
+}
+/** A Discord message the user agreed to send: plain text up to Discord's 2000 characters, never pinging a whole
+ *  server (@everyone, @here, role pings). */
+export function checkDiscordMessage(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return verdict(BLOCK, 'The message is empty.');
+  if (t.length > 2000) return verdict(BLOCK, 'Discord messages are 2000 characters at most; make it shorter or send it in parts.');
+  if (/@(everyone|here)\b|<@&\d+>/.test(t)) return verdict(BLOCK, 'No @everyone, @here or role pings from Roamies.');
+  return { ...verdict(SAFE), text: t };
+}
+
 /** Answering a coding agent's question (only with the user's answer): a few plain keys, nothing typed. */
 export function checkCoderKeys(keys) {
   const list = Array.isArray(keys) ? keys.map((k) => String(k).trim().toLowerCase()) : [];

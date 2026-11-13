@@ -6,7 +6,7 @@
 // like a background agent's. Answers to a coder's questions are the user's, never the chat's own.
 // Pure pieces first (tested in test/herdr.test.mjs), then createHerdr.
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -15,12 +15,13 @@ export const SESSION = 'roamies';
 const NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 const MACHINE = /^[\w.-]{1,40}$/;
 
-/** Where herdr is: on PATH, else where its installers put it (an app opened from the Dock has a short PATH). */
-export function findHerdr({ env = process.env, home = os.homedir(), exists = existsSync } = {}) {
+/** Where a program is (herdr, claude…): on PATH, else where installers put it (an app opened from the Dock has a short PATH). */
+export function findBin(name, { env = process.env, home = os.homedir(), exists = existsSync } = {}) {
   const dirs = [...String(env.PATH ?? '').split(path.delimiter), path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'];
-  for (const d of dirs) { const p = d && path.join(d, 'herdr'); if (p && exists(p)) return p; }
+  for (const d of dirs) { const p = d && path.join(d, name); if (p && exists(p)) return p; }
   return null;
 }
+export const findHerdr = (o) => findBin('herdr', o);
 const lastJson = (s) => { for (const l of String(s ?? '').trim().split('\n').reverse()) { try { return JSON.parse(l); } catch {} } return null; };
 // A command's end: a marker line with its exit code. The typed command shows the marker's text too, but never as
 // the start of a line with a number in it.
@@ -37,6 +38,14 @@ const mins = (ms) => (ms < 90_000 ? `${Math.max(1, Math.round(ms / 1000))} s` : 
 /** How each coder starts: free to edit files in its folder, still asking before anything risky (commands, the network,
  *  outside the folder). Other kinds start with their own defaults. */
 export const CODER_ARGS = { claude: ['--permission-mode', 'acceptEdits'], codex: ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'] };
+/** Its command line with the model and effort picked for the job (checked by safety.checkCoderModel first). Codex's
+ *  highest effort is xhigh. */
+export function coderArgs(kind, { model = null, effort = null } = {}) {
+  const base = [...(CODER_ARGS[kind] ?? [])];
+  if (kind === 'claude') return [...base, ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])];
+  if (kind === 'codex') return [...base, ...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort=${effort === 'max' ? 'xhigh' : effort}`] : [])];
+  return base;
+}
 
 /** Prompt queues that kick off a whole piece of work: each prompt goes in when the coder finishes the one before. */
 export const RECIPES = {
@@ -51,11 +60,52 @@ export const RECIPES = {
     'Make the top 3 improvements from IMPROVEMENTS.md, one at a time, running the tests after each. Keep each change small and focused.',
     'Run all the tests, commit your changes with git (one commit per improvement), and end with five lines: what you changed and what is left in IMPROVEMENTS.md.',
   ],
+  // A project's lead: plans each round for a team, then checks the merged result and plans the next.
+  lead: ({ goal, branch, round, rounds, kinds, notes = [], merged = null }) => {
+    const said = notes.length ? `\n${notes.map((n) => `The user added: ${n}`).join('\n')}\n` : '';
+    const how = `Split the work into 1 to 6 parts that can be built at the same time without touching the same files. For each part pick who does it and how hard they think, to fit the part: kind is one of ${kinds.join(', ')}.${kinds.includes('claude') ? ' For claude, model opus for the hardest design work and tricky bugs, sonnet for most work, haiku for simple mechanical changes.' : ''}${kinds.includes('codex') ? ' For codex, leave model out for its default.' : ''} effort is low, medium, high, xhigh or max: higher is slower and costs more, so save it for the hard parts. Each task must stand alone (the teammate sees only its task): say which files it owns, the interfaces it must keep to, and how to check its work. Don't build the parts yourself.`;
+    const plan = `write this JSON to ${NEXT_FILE} in this folder with your file-writing tool, not a shell command (git ignores the file): {"done": false, "summary": "one line on this round", "parts": [{"name": "api", "task": "…", "kind": "claude", "model": "sonnet", "effort": "medium"}]}`;
+    const end = `{"done": true, "summary": "what was built, how to run it, and anything still missing"}`;
+    if (!merged) return `You lead a team of coding agents on this project. The goal: ${goal}\n${said}You're in a git worktree on ${branch ? `branch ${branch}` : 'its own branch'}. Each teammate gets its own worktree branched from here, and their work is merged back into this branch when they're done.\nStudy the project first (README, layout, tests). ${how}\nThen ${plan}. If the goal is already met, write ${end} instead. Then stop.`;
+    const fix = merged.conflict
+      ? `Merging ${merged.conflict} hit conflicts (git status shows them). Resolve each one keeping what both sides meant, git add the files and git commit --no-edit${merged.rest.length ? `, then merge the rest the same way: ${merged.rest.map((b) => `git merge --no-ff ${b}`).join(', then ')}` : ''}.`
+      : `Their branches are merged into this branch${merged.skipped.length ? ` (${merged.skipped.join(', ')} changed nothing)` : ''}.`;
+    const next = round < rounds ? `If more is needed for the goal, plan the next round: ${plan}. If the goal is met, write ${end}.` : `This was the last round: write ${end} to ${NEXT_FILE}.`;
+    return `Round ${round} of ${rounds} is done. ${fix}${said}\nRun the tests and fix anything the merge broke, then commit. Then compare the project with the goal: ${goal}\n${next} Then stop.`;
+  },
   review: () => 'Review the changes made in this folder: run `git status` and `git diff` (and `git log -5 -p` if the work is committed). Report only real problems: bugs, missing tests, risky changes, each with the file and line. Do not change any files. End with one line: ship it, or what to fix first.',
 };
 
 /** Side by side in one tab: where member i's pane is split from, and which way (0 is the tab's own pane). */
-export const TEAM_SPLITS = [null, [0, 'right'], [0, 'down'], [1, 'down']];
+export const TEAM_SPLITS = [null, [0, 'right'], [0, 'down'], [1, 'down'], [2, 'right'], [3, 'right']];
+
+/** A project's plan file, written by its lead each round. */
+export const NEXT_FILE = 'ROAMIES_NEXT.json';
+const PART = z.object({ name: z.string().min(1).max(24), task: z.string().min(1).max(8000), kind: z.string().max(20).optional(), model: z.string().max(80).optional().nullable(), effort: z.string().max(10).optional().nullable() });
+const PLAN = z.object({ done: z.boolean(), summary: z.string().max(2000).optional().default(''), parts: z.array(PART).max(6).optional().default([]) });
+/** The lead's plan, checked: → { done, summary, parts } or { error } (in words the lead can act on). */
+export function parsePlan(text, { kinds = ['claude'], checkModel = null } = {}) {
+  let raw;
+  try { raw = JSON.parse(String(text ?? '').replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); } catch (e) { return { error: `${NEXT_FILE} isn't valid JSON (${e.message}).` }; }
+  const r = PLAN.safeParse(raw);
+  if (!r.success) return { error: `${NEXT_FILE} doesn't match the format: ${r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; ')}.` };
+  const { done, parts } = r.data, summary = r.data.summary.trim().replace(/[.\s]+$/, '');
+  if (!done && !parts.length) return { error: `${NEXT_FILE} has no parts; give 1 to 6, or done true.` };
+  const names = new Set();
+  for (const p of parts) {
+    const kind = p.kind || kinds[0];
+    if (!kinds.includes(kind)) return { error: `part ${p.name}: kind must be one of ${kinds.join(', ')}.` };
+    const v = checkModel?.({ kind, model: p.model, effort: p.effort });
+    if (v && v.level === 'block') return { error: `part ${p.name}: ${v.reason}` };
+    const name = p.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^[^a-z]+/, '').replace(/-+$/, '') || 'part';
+    if (names.has(name)) return { error: `two parts are called ${name}; names must differ.` };
+    names.add(name);
+    Object.assign(p, { name, kind, model: v?.model ?? p.model ?? null, effort: v?.effort ?? p.effort ?? null });
+  }
+  return { done, summary, parts };
+}
+/** What a teammate is told about the rest of the team, after its own task. */
+export const teamBrief = (goal, me, parts) => `\n\n(You're one of ${parts.length} coding agents working at the same time on: ${goal}\nThe others: ${parts.filter((p) => p.name !== me).map((p) => `${p.name}: ${p.task.split('\n')[0].slice(0, 120)}`).join('; ')}.\nKeep to your part and don't change files that belong to theirs: your work is committed and merged with theirs automatically when you're all done, so you don't need to commit.)`;
 
 /** The Herdr part of the live state: the coders started here, newest first, with how long each has run. '' when none. */
 export function liveCodersText(list, at = Date.now()) {
@@ -64,7 +114,8 @@ export function liveCodersText(list, at = Date.now()) {
   const line = (a) => {
     const state = a.state === 'blocked' ? 'waiting for an answer' : a.state;
     const step = a.total > 1 ? `, step ${Math.min(a.step, a.total)} of ${a.total}` : '';
-    const where = `${a.kind} in ${a.cwd}${a.branch ? ` on branch ${a.branch}` : ''}${a.machine ? ` on ${a.machine}` : ''}`;
+    const how = [a.model, a.effort && `${a.effort} effort`].filter(Boolean).join(', ');
+    const where = `${a.kind}${how ? ` (${how})` : ''} in ${a.cwd}${a.branch ? ` on branch ${a.branch}` : ''}${a.machine ? ` on ${a.machine}` : ''}${a.project ? `, ${a.role === 'lead' ? 'lead' : 'team member'} of project ${a.project}` : ''}`;
     return `- ${a.name} (${where}): ${state}${step}, ${mins(at - a.started)}${a.reviewOf ? `, reviewing ${a.reviewOf}` : ''}${a.pending ? ' (its task goes in once it\'s ready)' : ''}`;
   };
   return `Coding agents in Herdr (names for tell_coder, answer_coder, terminal_read and show_terminals):\n${shown.map(line).join('\n')}`;
@@ -75,9 +126,10 @@ export function liveCodersText(list, at = Date.now()) {
  * { classifyCommand, checkCoder, checkCoderKeys, BLOCK, ASK }, confirm(question, ctx) → bool, allowActions(),
  * openTerminal(command), notify(text) (phone alerts, optional), home, userName, exists, isEmptyDir, now, log.
  */
-export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActions, openTerminal, notify = () => {}, home = os.homedir(), userName = 'the user', exists = existsSync, isEmptyDir = (d) => { try { return readdirSync(d).length === 0; } catch { return false; } }, now = () => Date.now(), log = () => {}, pollMs = 4000, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActions, openTerminal, notify = () => {}, home = os.homedir(), userName = 'the user', exists = existsSync, kinds = ['claude'],
+  readFile = (f) => readFileSync(f, 'utf8'), removeFile = (f) => rmSync(f, { force: true }), session = SESSION, isEmptyDir = (d) => { try { return readdirSync(d).length === 0; } catch { return false; } }, now = () => Date.now(), log = () => {}, pollMs = 4000, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   // Commands for this computer go to Roamies' own session; for a saved SSH machine, to that machine's.
-  const target = (machine) => (machine ? ['--machine', machine] : ['--session', SESSION]);
+  const target = (machine) => (machine ? ['--machine', machine] : ['--session', session]);
   const h = async (args, { timeout = 15_000, machine = null } = {}) => {
     const r = await run(bin, [...target(machine), ...args], { timeout });
     const data = lastJson(r.stdout) ?? lastJson(r.stderr);
@@ -89,7 +141,7 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
   const wsOf = new Map(); // machine ('' here) → the Roamies workspace there
   // This computer's server starts when first needed; a machine's must already run (Herdr never starts one remotely).
   const ensure = (machine) => (machine ? Promise.resolve() : (ready ??= (async () => {
-    const running = async () => /status:\s*running/.test((await run(bin, ['--session', SESSION, 'status', 'server'], { timeout: 5000 })).stdout);
+    const running = async () => /status:\s*running/.test((await run(bin, ['--session', session, 'status', 'server'], { timeout: 5000 })).stdout);
     if (!(await running())) {
       spawnServer();
       for (let i = 0; i < 25 && !(await running()); i++) await wait(200);
@@ -118,23 +170,35 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
 
   // ---------- coders, and their news ----------
   const coders = new Map(); // name → { name, kind, cwd, repo, branch, machine, task, queue, step, total, review, reviewOf, pending, pane, state, news, told, screen, started, ended }
-  const readAgent = async (a, lines) => (await h(['agent', 'read', a.name, '--source', 'recent-unwrapped', '--lines', String(lines)], { machine: a.machine })).text;
+  // While it's asking something, Herdr can only read what's on its screen now, not the history above it.
+  const readAgent = async (a, lines) => (await h(['agent', 'read', a.name, '--source', 'recent-unwrapped', '--lines', String(lines)], { machine: a.machine })
+    .catch((e) => (/--source visible|alternate-screen/.test(e.message) ? h(['agent', 'read', a.name, '--source', 'visible'], { machine: a.machine }) : Promise.reject(e)))).text;
   const say = (a, text) => { try { notify(text); } catch (e) { log('herdr_notify', { error: String(e?.message ?? e) }); } };
   let timer = null;
   const watch = () => { if (!timer) { timer = setInterval(() => poll().catch((e) => log('herdr_poll', { error: String(e.message) })), pollMs); timer.unref?.(); } };
-  async function poll() {
+  let polling = null;
+  const poll = () => (polling ??= pollOnce().finally(() => { polling = null; }));
+  // A coder with onDone (a project's lead or teammate) is handed on to its project instead of becoming news.
+  const handOn = (a) => { a.told = true; a.news = null; Promise.resolve().then(() => a.onDone(a)).catch((e) => log('herdr_project', { error: String(e?.message ?? e) })); };
+  async function pollOnce() {
     const live = new Map();
     for (const machine of new Set([...coders.values()].filter((a) => !a.ended).map((a) => a.machine))) {
       for (const l of (await h(['agent', 'list'], { machine })).data?.agents ?? []) live.set(`${machine ?? ''}|${l.name}`, l);
     }
     for (const a of [...coders.values()]) {
       if (a.ended) continue;
-      const l = live.get(`${a.machine ?? ''}|${a.name}`);
-      if (!l) { Object.assign(a, { ended: now(), state: 'exited', news: 'gone', told: false }); say(a, `${a.name} (${a.kind}) stopped.`); continue; }
-      const st = l.agent_status, prev = a.state;
-      if (st === prev) continue;
-      a.state = st;
-      const settled = st === 'idle' || st === 'done';
+      try { await check(a, live); } catch (e) { log('herdr_poll', { coder: a.name, error: String(e.message).slice(0, 200) }); }
+    }
+    if (![...coders.values()].some((a) => !a.ended)) { clearInterval(timer); timer = null; }
+  }
+  async function check(a, live) {
+    const l = live.get(`${a.machine ?? ''}|${a.name}`);
+    if (!l) { Object.assign(a, { ended: now(), state: 'exited', news: 'gone', told: false }); if (a.onDone) handOn(a); else say(a, `${a.name} (${a.kind}) stopped.`); return; }
+    const st = l.agent_status, prev = a.state;
+    if (st === prev) return;
+    a.state = st;
+    const settled = st === 'idle' || st === 'done';
+    try {
       if (st === 'blocked') {
         await wait(800); // its question can still be drawing itself
         Object.assign(a, { screen: tailOf(await readAgent(a, 40), 25), news: 'ask', told: false });
@@ -143,15 +207,15 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
       else if (settled && (prev === 'working' || prev === 'blocked') && a.queue.length) await prompt(a, a.queue.shift()); // the next step, by itself
       else if (settled && (prev === 'working' || prev === 'blocked')) {
         Object.assign(a, { screen: tailOf(await readAgent(a, 80), 40), news: 'done', told: false, doneAt: now() });
+        if (a.onDone) return handOn(a);
         if (a.review && !a.reviewer) a.reviewer = await startReviewer(a).catch((e) => { log('herdr_review', { error: String(e.message) }); return null; });
         say(a, `${a.name} (${a.kind}) finished${a.total > 1 ? ` all ${a.total} steps` : ''}.`);
       } else if (a.news === 'ask' && !a.told) a.told = true; // answered on its own screen
-    }
-    if (![...coders.values()].some((a) => !a.ended)) { clearInterval(timer); timer = null; }
+    } catch (e) { a.state = prev; throw e; } // the same change is handled again on the next check
   }
   async function prompt(a, text) {
     await h(['agent', 'prompt', a.name, String(text)], { machine: a.machine });
-    Object.assign(a, { state: 'working', step: a.step + 1 });
+    Object.assign(a, { state: 'working', step: a.step + 1, doneAt: null });
   }
   const news = () => [...coders.values()].filter((a) => a.told === false && a.news).map((a) => ({
     id: a.name, title: `${a.name} (${a.kind})`, type: `${a.kind} in Herdr`, kind: a.news === 'ask' ? 'ask' : a.news === 'gone' ? 'failed' : 'done', old: false,
@@ -162,20 +226,27 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
   }));
   const markTold = (ids) => { for (const id of ids ?? []) { const a = coders.get(String(id)); if (a) a.told = true; } };
   const coderOf = (name) => { const a = coders.get(String(name)); if (!a) throw new Error(`No coding agent ${name}. The names are in the Coding agents part of the live state.`); return a; };
-  const nameFor = (wanted, kind) => {
+  // taken: names Herdr already has (it brings back a saved layout's agents after a restart).
+  const nameFor = (wanted, kind, taken = new Set()) => {
     let n = String(wanted ?? '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[^a-z]+/, '').slice(0, 32).replace(/-+$/, '') || kind;
     if (!NAME.test(n)) n = kind;
-    for (let i = 2; coders.has(n) && !coders.get(n).ended; i++) n = `${n.replace(/-\d+$/, '')}-${i}`;
+    const base = n;
+    for (let i = 2; (coders.has(n) && !coders.get(n).ended) || taken.has(n); i++) n = `${base}-${i}`;
     return n;
   };
 
   // A git worktree of the repo for one coder, where Herdr keeps its own (~/.herdr/worktrees/<repo>/roamies-<name>), on a
   // new branch roamies/<name> from what's committed now.
-  async function worktree(repo, name) {
+  const git = (dir, args, timeout = 30_000) => run('git', ['-C', dir, ...args], { timeout });
+  async function worktree(repo, name, base = null) {
     const top = await run('git', ['-C', repo, 'rev-parse', '--show-toplevel'], { timeout: 10_000 });
     if (top.code !== 0) throw new Error(`${repo} isn't a git repository, so it can't have worktrees. Leave worktree out, or run git init there first.`);
-    const root = top.stdout.trim(), branch = `roamies/${name}`, dir = path.join(home, '.herdr', 'worktrees', path.basename(root), `roamies-${name}`);
-    const r = await run('git', ['-C', root, 'worktree', 'add', '-b', branch, dir], { timeout: 30_000 });
+    const root = top.stdout.trim();
+    // A branch or folder left from an earlier run keeps its work: this one gets the next free name.
+    let tag = name;
+    for (let i = 2; i < 100 && ((await git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/roamies/${tag}`], 10_000)).code === 0 || exists(path.join(home, '.herdr', 'worktrees', path.basename(root), `roamies-${tag}`))); i++) tag = `${name}-${i}`;
+    const branch = `roamies/${tag}`, dir = path.join(home, '.herdr', 'worktrees', path.basename(root), `roamies-${tag}`);
+    const r = await run('git', ['-C', root, 'worktree', 'add', '-b', branch, dir, ...(base ? [base] : [])], { timeout: 30_000 });
     if (r.code !== 0) throw new Error(`Couldn't make a worktree: ${String(r.stderr || r.stdout).trim().slice(0, 200)}`);
     return { cwd: dir, repo: root, branch };
   }
@@ -183,22 +254,28 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
   /** Starts one coder in a pane (a new tab, or paneAt(cwd): a pane made for it once its folder is known, its worktree
    *  included): its first prompt goes in now, or once its startup question is answered; queue: prompts that follow,
    *  one each time it finishes. → the coder. */
-  async function startCoder({ kind, cwd, name, task, queue = [], review = null, worktree: wt = false, paneAt = null, machine = null, reviewOf = null }) {
+  async function startCoder({ kind, cwd, name, task, queue = [], review = null, worktree: wt = false, base = null, paneAt = null, machine = null, reviewOf = null, model = null, effort = null, onDone = null, project = null, role = null }) {
     if (!allowActions()) throw new Error(off);
     machine = checkMachine(machine);
     const v = safety.checkCoder({ kind, cwd, remote: !!machine }, home);
     if (v.level === safety.BLOCK) throw new Error(v.reason);
+    const mv = safety.checkCoderModel({ kind, model, effort });
+    if (mv.level === safety.BLOCK) throw new Error(mv.reason);
     if (review != null && safety.checkCoder({ kind: review, cwd: v.cwd, remote: !!machine }, home).level === safety.BLOCK) throw new Error(`review must be a coder kind like claude or codex, not ${review}.`);
     if (!machine && !exists(v.cwd)) throw new Error(`${cwd} doesn't exist.`);
     if (machine && wt) throw new Error('Worktrees are made on this computer only; leave worktree out on a machine.');
-    const n = nameFor(name, kind);
-    const place = wt ? await worktree(v.cwd, n) : { cwd: v.cwd, repo: null, branch: null };
+    await ensure(machine);
+    const taken = new Set(((await h(['agent', 'list'], { machine })).data?.agents ?? []).map((x) => x.name));
+    const n = nameFor(name, kind, taken);
+    const place = wt ? await worktree(v.cwd, n, base) : { cwd: v.cwd, repo: null, branch: null };
     const p = paneAt ? await paneAt(place.cwd) : (await newTab(place.cwd, n, machine)).pane;
     const a = { name: n, kind, cwd: place.cwd, repo: place.repo, branch: place.branch, machine, task: String(task), queue: queue.map(String), step: 0, total: 1 + queue.length,
-      review, reviewOf, reviewer: null, pending: null, pane: p, state: 'starting', news: null, told: true, screen: '', started: now(), ended: null };
+      review, reviewOf, reviewer: null, pending: null, pane: p, state: 'starting', news: null, told: true, screen: '', started: now(), ended: null,
+      model: mv.model, effort: mv.effort, onDone, project, role };
     coders.set(n, a);
     try {
-      await h(['agent', 'start', n, '--kind', kind, '--pane', p, '--timeout', '60000', ...(CODER_ARGS[kind] ? ['--', ...CODER_ARGS[kind]] : [])], { timeout: 75_000, machine });
+      const args = coderArgs(kind, mv);
+      await h(['agent', 'start', n, '--kind', kind, '--pane', p, '--timeout', '60000', ...(args.length ? ['--', ...args] : [])], { timeout: 75_000, machine });
     } catch (e) {
       if (!/not ready|blocked/i.test(e.message)) { coders.delete(n); throw new Error(`Couldn't start ${kind}: ${e.message}`); }
       // Blocked at startup (a "trust this folder?" check, a login): the task goes in once it's answered. Its
@@ -222,7 +299,142 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
     : `${a.name} (${a.kind}) is working in ${a.cwd}${a.branch ? ` on branch ${a.branch}` : ''}${a.total > 1 ? `, step 1 of ${a.total} (the rest go in by themselves)` : ''}.`);
   const done = (list) => `${list.map(started).join('\n')}\nYou'll hear when ${list.length > 1 ? 'each one finishes' : 'it finishes'} or asks something. Say so in a few words.`;
 
+  // ---------- teams side by side ----------
+  /** Coders side by side in one new tab, each on its own task (and worktree, from base, when wt). → { list, tab } */
+  async function startTeam({ cwd, kind = 'claude', members, wt = false, review = null, base = null, label = 'team', extra = {} }) {
+    const panes = [], list = [];
+    let tab = null;
+    for (const [i, m] of members.entries()) {
+      const k = m.kind ?? kind, v = safety.checkCoder({ kind: k, cwd }, home);
+      if (v.level === safety.BLOCK) throw new Error(v.reason);
+      const [from, dir] = TEAM_SPLITS[i] ?? [];
+      const paneAt = async (at) => { if (i) panes[i] = await split(panes[from], dir, at); else ({ pane: panes[0], tab } = await newTab(at, `${label} ${m.name}`.slice(0, 24))); return panes[i]; };
+      list.push(await startCoder({ kind: k, cwd, name: m.name, task: m.task, queue: m.then ?? [], review, worktree: wt, base, paneAt, model: m.model ?? null, effort: m.effort ?? null, ...extra }));
+    }
+    return { list, tab };
+  }
+
+  // ---------- merging ----------
+  /** Whatever a coder left uncommitted in its worktree, committed on its own branch. */
+  async function commitAll(dir, message) {
+    if (!(await git(dir, ['status', '--porcelain'])).stdout.trim()) return true;
+    await git(dir, ['add', '-A']);
+    const c = await git(dir, ['commit', '-q', '-m', message]);
+    if (c.code === 0) return true;
+    // No git identity set up on this computer: committed as Roamies.
+    return (await git(dir, ['-c', 'user.name=Roamies', '-c', 'user.email=roamies@localhost', 'commit', '-q', '-m', message])).code === 0;
+  }
+  /** Merges each branch into dir's checkout in turn, stopping at the first conflict (left for a coder to resolve).
+   *  → { merged, skipped (nothing new), conflict (the branch that hit one) or null, rest (not merged yet) } */
+  async function mergeBranches(dir, branches) {
+    const merged = [], skipped = [];
+    for (const [i, b] of branches.entries()) {
+      if ((await git(dir, ['rev-list', '--count', `HEAD..${b}`])).stdout.trim() === '0') { skipped.push(b); continue; }
+      let r = await git(dir, ['merge', '--no-ff', '--no-edit', b], 60_000);
+      // No git identity set up on this computer: merged as Roamies.
+      if (r.code !== 0 && /tell me who you are|empty ident/i.test(r.stderr)) r = await git(dir, ['-c', 'user.name=Roamies', '-c', 'user.email=roamies@localhost', 'merge', '--no-ff', '--no-edit', b], 60_000);
+      if (r.code !== 0) {
+        if (!/conflict/i.test(r.stdout + r.stderr)) { await git(dir, ['merge', '--abort']); throw new Error(`Couldn't merge ${b}: ${String(r.stderr || r.stdout).trim().slice(0, 300)}`); }
+        return { merged, skipped, conflict: b, rest: branches.slice(i + 1) };
+      }
+      merged.push(b);
+    }
+    return { merged, skipped, conflict: null, rest: [] };
+  }
+  const resolveTask = (m, what) => `You're merging ${what} into this branch. ${m.merged.length ? `Already merged: ${m.merged.join(', ')}. ` : ''}Merging ${m.conflict} hit conflicts (git status shows them). Resolve each one keeping what both sides meant, git add the files and git commit --no-edit${m.rest.length ? `, then merge the rest the same way: ${m.rest.map((b) => `git merge --no-ff ${b}`).join(', then ')}` : ''}. Then run the tests, fix anything the merge broke, and commit. End with three lines: what conflicted, how you resolved it, and whether the tests pass.`;
+
+  // ---------- projects: a lead plans, a team builds side by side, Roamies merges, round after round ----------
+  // name → { name, goal, repo, branch, dir, round, rounds, notes, phase, lead, members, tab, summary, plan, tries, news, told, started, ended }
+  const projects = new Map();
+  const projectOf = (name) => { const p = projects.get(String(name)); if (!p) throw new Error(`No project ${name}. The names are in the Projects part of the live state.`); return p; };
+  const tellNews = (p, kind, text) => { Object.assign(p, { news: kind, told: false, text }); say(p, `Project ${p.name}: ${text.split('.')[0]}.`); };
+  const finish = (p, phase, text) => { Object.assign(p, { phase, ended: now() }); tellNews(p, phase === 'done' ? 'done' : 'failed', text); };
+  async function promptLead(p, merged = null) {
+    removeFile(path.join(p.dir, NEXT_FILE));
+    const text = RECIPES.lead({ goal: p.goal, branch: p.branch, round: merged ? p.round : 1, rounds: p.rounds, kinds, notes: p.notes.splice(0), merged });
+    const lead = coders.get(p.lead);
+    if (lead.state === 'blocked' || lead.pending) lead.pending = text; else await prompt(lead, text);
+    p.phase = merged ? 'checking' : 'planning';
+    watch();
+  }
+  // The lead finished a turn: its plan starts the next round, or the project is done.
+  async function leadDone(p, lead) {
+    if (p.phase !== 'planning' && p.phase !== 'checking') return;
+    if (lead.ended) return finish(p, 'failed', `its lead ${lead.name} stopped, so the project stopped after round ${p.round}. The work so far is on branch ${p.branch} in ${p.dir}.`);
+    let text = null;
+    try { text = readFile(path.join(p.dir, NEXT_FILE)); } catch {}
+    const plan = text == null ? { error: `There's no ${NEXT_FILE} in ${p.dir}.` } : parsePlan(text, { kinds, checkModel: safety.checkCoderModel });
+    if (plan.error) {
+      if (++p.tries > 2) return finish(p, 'failed', `its lead couldn't write a usable plan (${plan.error}). The work so far is on branch ${p.branch} in ${p.dir}.`);
+      return prompt(lead, `${plan.error} Write it again: exactly the JSON format asked for, in ${NEXT_FILE} in this folder. Then stop.`);
+    }
+    p.tries = 0;
+    removeFile(path.join(p.dir, NEXT_FILE));
+    if (plan.done || p.phase === 'checking' && p.round >= p.rounds) {
+      await commitAll(p.dir, `${p.name}: finish`);
+      return finish(p, 'done', `done after ${p.round} round${p.round === 1 ? '' : 's'}: ${plan.summary || 'the goal is met'}. Everything is on branch ${p.branch} (in ${p.dir}); land_work merges it into ${userName}'s checkout once they say so.`);
+    }
+    try { await startRound(p, plan); } catch (e) { finish(p, 'failed', `round ${p.round} couldn't start: ${e.message}. The work so far is on branch ${p.branch} in ${p.dir}.`); }
+  }
+  async function startRound(p, plan) {
+    if (p.phase === 'checking') p.round++;
+    p.phase = 'starting'; p.plan = plan; p.summary = plan.summary;
+    await commitAll(p.dir, `${p.name}: plan round ${p.round}`); // anything the lead changed itself goes in first
+    if (p.tab) await h(['tab', 'close', p.tab]).catch(() => {}); // last round's team is merged by now
+    for (const n of p.members) { const a = coders.get(n); if (a) a.ended ??= now(); }
+    const members = plan.parts.map((part) => ({ ...part, name: `${p.name}-${part.name}`.slice(0, 32), task: part.task + teamBrief(p.goal, part.name, plan.parts) }));
+    const { list, tab } = await startTeam({ cwd: p.repo, members, wt: true, base: p.branch, label: `${p.name} r${p.round}`, extra: { project: p.name, role: 'member', onDone: () => memberDone(p) } });
+    Object.assign(p, { members: list.map((a) => a.name), tab, phase: 'working' });
+    tellNews(p, 'round', `round ${p.round} of up to ${p.rounds} started: ${plan.summary ? `${plan.summary}. ` : ''}${list.map((a) => `${a.name} (${[a.kind, a.model, a.effort && `${a.effort} effort`].filter(Boolean).join(', ')})`).join(', ')}`);
+  }
+  // A teammate finished: once all have, their work is committed and merged, and the lead checks it.
+  async function memberDone(p) {
+    const team = p.members.map((n) => coders.get(n));
+    if (p.phase !== 'working' || team.some((a) => !a.doneAt && !a.ended)) return;
+    p.phase = 'merging';
+    for (const a of team) await commitAll(a.cwd, `${a.name}: ${a.task.split('\n')[0].slice(0, 60)}`);
+    await commitAll(p.dir, `${p.name}: notes`);
+    let m;
+    try { m = await mergeBranches(p.dir, team.map((a) => a.branch)); }
+    catch (e) { return finish(p, 'failed', `merging round ${p.round} failed: ${e.message}`); }
+    await promptLead(p, m);
+  }
+  async function startProject({ folder, goal, rounds = 3, parts = null, lead_model = null, lead_effort = 'high', name }) {
+    if (!allowActions()) throw new Error(off);
+    const v = safety.checkCoder({ kind: 'claude', cwd: folder }, home);
+    if (v.level === safety.BLOCK) throw new Error(v.reason);
+    if (!exists(v.cwd)) throw new Error(`${folder} doesn't exist. kickstart_project starts a new one; or make the folder first.`);
+    if ((await git(v.cwd, ['rev-parse', '--show-toplevel'], 10_000)).code !== 0) await git(v.cwd, ['init', '-q']);
+    const top = (await git(v.cwd, ['rev-parse', '--show-toplevel'], 10_000)).stdout.trim() || v.cwd;
+    // Worktrees branch from a commit: a repo with none gets an empty first one.
+    if ((await git(top, ['rev-parse', '--verify', '--quiet', 'HEAD'], 10_000)).code !== 0) await git(top, ['-c', 'user.name=Roamies', '-c', 'user.email=roamies@localhost', 'commit', '-q', '--allow-empty', '-m', 'Start']);
+    // The plan file never gets committed, in any of the repo's worktrees.
+    const common = (await git(top, ['rev-parse', '--git-common-dir'], 10_000)).stdout.trim();
+    if (common) { const ex = path.resolve(top, common, 'info', 'exclude'); let cur = ''; try { cur = readFile(ex); } catch {} if (!cur.includes(NEXT_FILE)) await run('sh', ['-c', 'mkdir -p "$(dirname "$1")" && printf "\n%s\n" "$2" >> "$1"', 'sh', ex, NEXT_FILE], { timeout: 5000 }); }
+    const n = nameFor(name || path.basename(top), 'project').slice(0, 20).replace(/-+$/, '');
+    if (projects.has(n) && !projects.get(n).ended) throw new Error(`Project ${n} is still running; tell_project sends it more, or pick another name.`);
+    const given = parts?.length ? parsePlan(JSON.stringify({ done: false, parts }), { kinds, checkModel: safety.checkCoderModel }) : null;
+    if (given?.error) throw new Error(given.error.replace(`${NEXT_FILE} `, 'parts: '));
+    const p = { name: n, goal: String(goal), repo: top, branch: null, dir: null, round: 1, rounds, notes: [], phase: 'starting', lead: null, members: [], tab: null, summary: '', plan: null, tries: 0, news: null, told: true, started: now(), ended: null };
+    const lead = await startCoder({ kind: 'claude', cwd: top, name: `${n}-lead`, task: given ? `You lead a team of coding agents on this project, with the goal: ${goal}\nWait: the team is working now. You'll get the merged result to check.` : RECIPES.lead({ goal, branch: null, round: 1, rounds, kinds }), worktree: true, model: lead_model, effort: lead_effort, project: n, role: 'lead', onDone: (a) => leadDone(p, a) });
+    Object.assign(p, { lead: lead.name, branch: lead.branch, dir: lead.cwd });
+    projects.set(n, p);
+    if (given) await startRound(p, given); else p.phase = 'planning';
+    return p;
+  }
+  const projectNews = () => [...projects.values()].filter((p) => p.told === false && p.news).map((p) => ({
+    id: `project:${p.name}`, title: `project ${p.name}`, type: 'coding team in Herdr', kind: p.news === 'failed' ? 'failed' : 'done', old: false,
+    outcome: p.news === 'failed' ? null : p.text, report: null, needs_you: null, files: [], place: p.dir, question: null, reason: p.news === 'failed' ? p.text : null,
+  }));
+  const projectsText = () => {
+    const live = [...projects.values()].filter((p) => !p.ended);
+    if (!live.length) return '';
+    const doing = { starting: 'starting', planning: 'its lead is planning', working: 'the team is working', merging: 'merging the team\'s work', checking: 'its lead is checking the merged work' };
+    return `Projects (names for tell_project and stop_project):\n${live.map((p) => `- ${p.name}: round ${p.round} of up to ${p.rounds}, ${doing[p.phase] ?? p.phase}${p.phase === 'working' ? ` (${p.members.join(', ')})` : ''}; goal: ${p.goal.slice(0, 160)}; branch ${p.branch}`).join('\n')}`;
+  };
+
   const KIND = z.string().min(1).max(20), FOLDER = z.string().min(1).max(500);
+  const MODEL = { model: z.string().max(80).optional(), effort: z.string().max(10).optional() };
   const tools = [
     {
       name: 'terminal_run',
@@ -271,37 +483,102 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
     },
     {
       name: 'start_coder',
-      description: `Start a coding agent (claude = Claude Code, codex, opencode…) in its own Herdr tab, working in a folder on a task: real coding work in ${userName}'s projects (a bug, a feature, failing tests). It edits files in that folder freely and asks before anything risky; its questions go to ${userName}, never answered by you. It keeps working after your reply; you hear when it finishes or asks something. name: short, lowercase, unique (fixer, reviewer). task: complete and specific, it sees none of this conversation. then: follow-up prompts, each sent by itself when it finishes the one before (plan, then build, then test). worktree: true to work on its own git branch and checkout, so its changes stay apart (best when several coders share a repo). review: a coder kind (codex, claude) that reviews its changes when it's done, in a pane beside it. beside: another coder's name, to put this one's pane next to it in the same tab. machine: a saved machine's label (list_machines). Once it starts, say so in a few words.`,
+      description: `Start a coding agent (claude = Claude Code, codex, opencode…) in its own Herdr tab, working in a folder on a task: real coding work in ${userName}'s projects (a bug, a feature, failing tests). It edits files in that folder freely and asks before anything risky; its questions go to ${userName}, never answered by you. It keeps working after your reply; you hear when it finishes or asks something. name: short, lowercase, unique (fixer, reviewer). task: complete and specific, it sees none of this conversation. then: follow-up prompts, each sent by itself when it finishes the one before (plan, then build, then test). worktree: true to work on its own git branch and checkout, so its changes stay apart (best when several coders share a repo). review: a coder kind (codex, claude) that reviews its changes when it's done, in a pane beside it. beside: another coder's name, to put this one's pane next to it in the same tab. machine: a saved machine's label (list_machines). model and effort (claude and codex only): fit them to the task, like opus with high effort for hard design or a tricky bug, sonnet with medium for most work, haiku with low for simple mechanical changes; left out, its own defaults. Once it starts, say so in a few words.`,
       parameters: z.object({ kind: KIND, cwd: FOLDER, task: z.string().min(1).max(8000), name: z.string().max(32).optional(), then: z.array(z.string().min(1).max(4000)).max(10).optional(),
-        worktree: z.boolean().optional(), review: z.string().max(20).optional(), beside: z.string().max(32).optional(), machine: z.string().max(40).optional() }),
+        worktree: z.boolean().optional(), review: z.string().max(20).optional(), beside: z.string().max(32).optional(), machine: z.string().max(40).optional(), ...MODEL }),
       timeoutMs: 150_000,
-      execute: async ({ kind, cwd, task, name, then = [], worktree: wt, review, beside, machine }) => {
+      execute: async ({ kind, cwd, task, name, then = [], worktree: wt, review, beside, machine, model, effort }) => {
         let paneAt = null;
         if (beside) {
           const b = coderOf(beside);
           if ((b.machine ?? null) !== (checkMachine(machine) ?? null)) throw new Error(`${b.name} is on ${b.machine ?? 'this computer'}; beside works on the same one.`);
           paneAt = (dir) => split(b.pane, 'right', dir, b.machine);
         }
-        return done([await startCoder({ kind, cwd, name, task, queue: then, review: review || null, worktree: !!wt, paneAt, machine })]);
+        return done([await startCoder({ kind, cwd, name, task, queue: then, review: review || null, worktree: !!wt, paneAt, machine, model, effort })]);
       },
     },
     {
       name: 'start_team',
-      description: `Start 2 to 4 coders side by side in one Herdr tab (panes next to each other), each on its own task in the same project: a team that splits the work (frontend and backend, the feature and its tests, several bugs). Each gets its own git worktree when worktree is true (recommended when they'd touch the same files). Their questions and results come to you one by one, like start_coder's. members: [{name, task, kind?}], kind defaults to the team's kind.`,
-      parameters: z.object({ cwd: FOLDER, kind: KIND.optional(), members: z.array(z.object({ name: z.string().min(1).max(32), task: z.string().min(1).max(8000), kind: KIND.optional(), then: z.array(z.string().min(1).max(4000)).max(10).optional() })).min(2).max(4),
+      description: `Start 2 to 6 coders side by side in one Herdr tab (panes next to each other), each on its own task in the same project: a team that splits the work (frontend and backend, the feature and its tests, several bugs). Give each member the kind, model and effort its part needs (as for start_coder). Each gets its own git worktree when worktree is true (recommended when they'd touch the same files; merge_work joins their branches after). Their questions and results come to you one by one, like start_coder's. For a whole goal worked on in rounds, with the merging done for you, use start_project instead. members: [{name, task, kind?, model?, effort?}], kind defaults to the team's kind.`,
+      parameters: z.object({ cwd: FOLDER, kind: KIND.optional(), members: z.array(z.object({ name: z.string().min(1).max(32), task: z.string().min(1).max(8000), kind: KIND.optional(), then: z.array(z.string().min(1).max(4000)).max(10).optional(), ...MODEL })).min(2).max(6),
         worktree: z.boolean().optional(), review: z.string().max(20).optional() }),
-      timeoutMs: 400_000,
+      timeoutMs: 600_000,
       execute: async ({ cwd, kind = 'claude', members, worktree: wt, review }) => {
         if (!allowActions()) throw new Error(off);
-        const panes = [], list = [];
-        for (const [i, m] of members.entries()) {
-          const k = m.kind ?? kind, v = safety.checkCoder({ kind: k, cwd }, home);
-          if (v.level === safety.BLOCK) throw new Error(v.reason);
-          const [from, dir] = TEAM_SPLITS[i] ?? [];
-          const paneAt = async (at) => { panes[i] = i ? await split(panes[from], dir, at) : (await newTab(at, `team ${m.name}`.slice(0, 24))).pane; return panes[i]; };
-          list.push(await startCoder({ kind: k, cwd, name: m.name, task: m.task, queue: m.then ?? [], review: review || null, worktree: !!wt, paneAt }));
+        return done((await startTeam({ cwd, kind, members, wt: !!wt, review: review || null })).list);
+      },
+    },
+    {
+      name: 'start_project',
+      description: `Work on a whole goal in ${userName}'s project with a team of coders, in rounds, by itself: a lead coder (Claude) studies the project and splits the work into up to 6 parts, picking for each the coder kind, model and effort it needs; the team builds them side by side in one Herdr tab, each on its own git branch; Roamies commits and merges their branches; the lead resolves any conflicts, runs the tests, checks the result against the goal and plans the next round, until the goal is met or rounds run out. Everything ends up on one branch, roamies/<name>-lead, and ${userName}'s own checkout isn't touched (land_work merges it in when they say so). You hear when each round starts and when it's done; teammates' questions come to you as usual. ${userName} can add instructions any time with tell_project. goal: everything they want, specific. rounds: at most this many (default 3). parts: only when ${userName} already said how to split it, [{name, task, kind?, model?, effort?}], and the lead starts by checking their work. lead_model, lead_effort: for the lead (default high effort).`,
+      parameters: z.object({ folder: FOLDER, goal: z.string().min(1).max(6000), rounds: z.number().int().min(1).max(6).optional(), name: z.string().max(20).optional(),
+        parts: z.array(PART).max(6).optional(), lead_model: z.string().max(80).optional(), lead_effort: z.string().max(10).optional() }),
+      timeoutMs: 600_000,
+      execute: async (args) => {
+        const p = await startProject(args);
+        return `Project ${p.name} started in ${p.repo}, on branch ${p.branch}: ${p.phase === 'working' ? `the team is working (${p.members.join(', ')})` : 'its lead is planning the first round'}. It goes up to ${p.rounds} round${p.rounds === 1 ? '' : 's'} by itself; you'll hear as each starts and when it's done. Say so in a few words.${coders.get(p.lead)?.state === 'blocked' ? ` Its lead is asking something first: ${coders.get(p.lead).screen.slice(-300)}` : ''}`;
+      },
+    },
+    {
+      name: 'tell_project',
+      description: `Pass ${userName}'s new instructions to a running project (start_project) while it works: the teammates working now get it right away, and its lead takes it into account when it checks the round and plans the next.`,
+      parameters: z.object({ name: z.string().min(1).max(32), message: z.string().min(1).max(4000) }),
+      execute: async ({ name, message }) => {
+        const p = projectOf(name);
+        if (p.ended) throw new Error(`Project ${p.name} already ended.`);
+        const lead = coders.get(p.lead), sent = [];
+        if (p.phase === 'planning' || p.phase === 'checking') {
+          if (lead.state === 'working') { await h(['agent', 'prompt', lead.name, `${userName} adds: ${message}`]); sent.push(lead.name); } else p.notes.push(String(message));
+        } else {
+          p.notes.push(String(message));
+          for (const a of p.members.map((n) => coders.get(n)).filter((a) => a && !a.ended && !a.doneAt && a.state !== 'blocked')) { await h(['agent', 'prompt', a.name, `${userName} adds, for the whole team: ${message}`]); sent.push(a.name); }
         }
-        return done(list);
+        return `${sent.length ? `Sent to ${sent.join(', ')} now. ` : ''}${p.notes.length ? 'Its lead gets it when it checks this round.' : ''}`.trim() || 'Noted.';
+      },
+    },
+    {
+      name: 'stop_project', description: 'Stop a project from starting more rounds (its coders stay open to look at, and the work so far stays on its branch).',
+      parameters: z.object({ name: z.string().min(1).max(32) }),
+      execute: async ({ name }) => { const p = projectOf(name); if (!p.ended) Object.assign(p, { phase: 'stopped', ended: now() }); return `Project ${p.name} won't go on. Its work so far is on branch ${p.branch} in ${p.dir}.`; },
+    },
+    {
+      name: 'merge_work',
+      description: `Join work from several git branches (like a start_team's worktree branches) into one new branch, on its own worktree so ${userName}'s checkout isn't touched: each branch is merged in turn, and if they conflict a coder (Claude, high effort) resolves the conflicts, finishes the merge and runs the tests. repo: the project folder. branches: the branches to join, in order. name: for the new branch (roamies/<name>). Coders' uncommitted work in their worktrees is committed first.`,
+      parameters: z.object({ repo: FOLDER, branches: z.array(z.string().min(1).max(100)).min(1).max(8), name: z.string().max(24).optional() }),
+      timeoutMs: 300_000,
+      execute: async ({ repo, branches, name }) => {
+        if (!allowActions()) throw new Error(off);
+        const v = safety.checkCoder({ kind: 'claude', cwd: repo }, home);
+        if (v.level === safety.BLOCK) throw new Error(v.reason);
+        const list = branches.map((b) => { const c = safety.checkBranch(b); if (c.level === safety.BLOCK) throw new Error(c.reason); return c.branch; });
+        for (const a of coders.values()) if (a.branch && list.includes(a.branch) && exists(a.cwd)) await commitAll(a.cwd, `${a.name}: ${a.task.split('\n')[0].slice(0, 60)}`);
+        const n = nameFor(name || 'merged', 'merged');
+        const wt = await worktree(v.cwd, n);
+        let m;
+        try { m = await mergeBranches(wt.cwd, list); } catch (e) { return `${e.message} The worktree is ${wt.cwd} (branch ${wt.branch}).`; }
+        if (!m.conflict) return `Merged ${m.merged.join(', ') || 'nothing new'}${m.skipped.length ? ` (${m.skipped.join(', ')} had nothing new)` : ''} into branch ${wt.branch}, in ${wt.cwd}. land_work merges it into ${userName}'s checkout once they say so.`;
+        const c = await startCoder({ kind: 'claude', cwd: wt.cwd, name: `${n}-fix`, task: resolveTask(m, list.join(', ')), effort: 'high' });
+        return `${m.merged.length ? `Merged ${m.merged.join(', ')}; ` : ''}merging ${m.conflict} hit conflicts, so ${c.name} is resolving it in ${wt.cwd} (branch ${wt.branch}) and will merge the rest. ${started(c)}`;
+      },
+    },
+    {
+      name: 'land_work',
+      description: `Merge a finished branch (a project's or merge_work's) into ${userName}'s own checkout of the repo, on the branch they have out now. Only once they've said to; it asks them first, and refuses while they have uncommitted changes.`,
+      parameters: z.object({ repo: FOLDER, branch: z.string().min(1).max(100) }),
+      timeoutMs: 120_000,
+      execute: async ({ repo, branch }, ctx) => {
+        if (!allowActions()) throw new Error(off);
+        const v = safety.checkCoder({ kind: 'claude', cwd: repo }, home), b = safety.checkBranch(branch);
+        if (v.level === safety.BLOCK) throw new Error(v.reason);
+        if (b.level === safety.BLOCK) throw new Error(b.reason);
+        if ((await git(v.cwd, ['status', '--porcelain', '--untracked-files=no'])).stdout.trim()) throw new Error(`${repo} has uncommitted changes; ${userName} should commit or stash them first.`);
+        const cur = (await git(v.cwd, ['branch', '--show-current'])).stdout.trim() || 'HEAD';
+        const count = (await git(v.cwd, ['rev-list', '--count', `HEAD..${b.branch}`])).stdout.trim();
+        if (count === '0') return `${b.branch} has nothing that ${cur} doesn't already have.`;
+        if (!(await confirm(`Merge ${b.branch} (${count} commit${count === '1' ? '' : 's'}) into ${cur} in ${path.basename(v.cwd)}?`, ctx))) throw new Error(`${userName} said no, so nothing was merged.`);
+        const r = await git(v.cwd, ['merge', '--no-ff', '--no-edit', b.branch], 60_000);
+        if (r.code !== 0) { await git(v.cwd, ['merge', '--abort']); throw new Error(`It didn't merge cleanly, so nothing changed: ${String(r.stdout || r.stderr).trim().slice(0, 300)}. merge_work with ${cur} and ${b.branch} resolves it on a separate branch first.`); }
+        return `Merged ${b.branch} into ${cur}.`;
       },
     },
     {
@@ -363,7 +640,7 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
         const a = name ? coderOf(name) : null;
         if (a?.machine) return `${a.name} runs on ${a.machine}: ${userName} can watch it by opening herdr there (over SSH), in its Roamies workspace.`;
         if (a) await h(['agent', 'focus', a.name]).catch(() => {});
-        await openTerminal(`'${bin}' --session ${SESSION}`);
+        await openTerminal(`'${bin}' --session ${session}`);
         return `Opened it in a terminal window${a ? `, with ${a.name} in front` : ''}.`;
       },
     },
@@ -395,21 +672,28 @@ export function createHerdr({ bin, run, spawnServer, safety, confirm, allowActio
     return { name: a.name, state: 'still working', screen: tailOf(await readAgent(a, 40), 25) };
   }
 
-  return { tools, news, markTold, poll, runCoder, liveText: () => liveCodersText([...coders.values()], now()), coders, stop: () => { clearInterval(timer); timer = null; } };
+  return {
+    tools, poll, runCoder, coders, projects, stop: () => { clearInterval(timer); timer = null; },
+    news: () => [...news(), ...projectNews()],
+    markTold: (ids) => { markTold(ids); for (const id of ids ?? []) { const p = String(id).startsWith('project:') && projects.get(String(id).slice(8)); if (p) p.told = true; } },
+    liveText: () => [liveCodersText([...coders.values()], now()), projectsText()].filter(Boolean).join('\n'),
+  };
 }
 
 /** Ghostty's app, if it's installed where apps go. */
 export const ghosttyApp = ({ home = os.homedir(), exists = existsSync } = {}) => ['/Applications/Ghostty.app', path.join(home, 'Applications', 'Ghostty.app')].find((p) => exists(p)) ?? null;
 
 /** The real dependencies: herdr found on this computer, or null when it isn't installed. */
-export function herdrDeps({ home = os.homedir(), env = process.env } = {}) {
+export function herdrDeps({ home = os.homedir(), env = process.env, session = SESSION } = {}) {
   if (env.ROAMIES_NO_HERDR) return null; // tests that must not reach a real Herdr
   const bin = findHerdr({ home });
   if (!bin || !/^[\w./ -]+$/.test(bin)) return null;
   return {
     bin,
+    kinds: ['claude', 'codex', 'opencode', 'gemini'].filter((k) => findBin(k, { home })), // the coders installed here
     run: (file, args, { timeout } = {}) => new Promise((resolve) => execFile(file, args, { timeout, maxBuffer: 16 << 20, cwd: home }, (e, stdout, stderr) => resolve({ code: e ? (typeof e.code === 'number' ? e.code : 1) : 0, stdout: String(stdout), stderr: String(stderr) }))),
-    spawnServer: () => spawn(bin, ['--session', SESSION, 'server'], { detached: true, stdio: 'ignore', cwd: home }).unref(),
+    session,
+    spawnServer: () => spawn(bin, ['--session', session, 'server'], { detached: true, stdio: 'ignore', cwd: home }).unref(),
     openTerminal: (command) => new Promise((resolve) => {
       const done = () => resolve();
       if (process.platform !== 'darwin') return execFile('x-terminal-emulator', ['-e', 'sh', '-c', command], done);
