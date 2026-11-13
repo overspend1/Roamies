@@ -1,6 +1,6 @@
 // Discord (discord.mjs): the user's own bot, driven through a stand-in Discord API and gateway. Run: npm test
 import assert from 'node:assert/strict';
-import { createDiscord, INTENTS, inviteUrl, messageLine, PERMISSIONS, resolveTarget } from '../discord.mjs';
+import { createDiscord, gifOnly, ignoredChannel, INTENTS, inviteUrl, messageLine, PERMISSIONS, resolveTarget } from '../discord.mjs';
 import { checkDiscordMessage } from '../safety.mjs';
 
 // Where a message goes: a channel by name (or server/name), a person, or an id.
@@ -13,6 +13,12 @@ assert.deepEqual(resolveTarget('@Ola', guilds), { user: 'ola' });
 assert.deepEqual(resolveTarget('444444444444444444', guilds), { channel: '444444444444444444' });
 assert.match(resolveTarget('rm -rf /', guilds).error, /isn't a channel/);
 assert.equal(messageLine({ author: { username: 'ola', global_name: 'Ola' }, content: 'see you\n at 8', timestamp: '2026-11-13T18:30:00Z', attachments: [{ filename: 'map.png' }] }), '[2026-11-13 18:30] Ola: see you at 8 [map.png]');
+// gif wars is never looked at; a message that's only a GIF has nothing to read.
+for (const n of ['gif-wars', 'GIF Wars', '🔥gif_wars🔥', 'the-gif-wars-2']) assert.ok(ignoredChannel(n), n);
+for (const n of ['general', 'gifts', 'wars']) assert.ok(!ignoredChannel(n), n);
+assert.ok(ignoredChannel('memes', ['memes']), 'the list can change');
+assert.ok(gifOnly({ content: 'https://tenor.com/view/cat-dance-123' }) && gifOnly({ content: '', attachments: [{ filename: 'lol.gif' }] }));
+assert.ok(!gifOnly({ content: 'look https://tenor.com/view/x' }) && !gifOnly({ content: 'hi' }) && !gifOnly({ content: '', attachments: [{ filename: 'plan.png' }] }));
 assert.equal(inviteUrl('99'), `https://discord.com/oauth2/authorize?client_id=99&scope=bot&permissions=${PERMISSIONS}`);
 assert.equal(PERMISSIONS, 1024 + 2048 + 65536 + 1048576 + 2097152, 'view channels, send messages, read history, connect and speak: nothing more');
 
@@ -100,9 +106,12 @@ assert.equal(sent.length, before, 'nothing went out');
 await assert.rejects(tool('discord_call').execute({}), /Ken isn't in a voice channel the bot can see/);
 ws.in({ op: 0, s: 7, t: 'GUILD_CREATE', d: { id: 'g1', name: 'Crew', channels: [{ id: '111111111111111111', name: 'general', type: 0 }, { id: '666666666666666666', name: 'Hang out', type: 2 }], voice_states: [{ user_id: '42', channel_id: '666666666666666666' }] } });
 assert.match(await tool('discord_list').execute({}), /- Crew: #general; voice: Hang out$/m);
-assert.equal(await tool('discord_call').execute({}), "Joined Hang out in Crew. I answer when someone says my name; Ken's requests can use my tools, friends just chat.");
+assert.equal(await tool('discord_call').execute({}), "Joined Hang out in Crew. I answer when someone says my name, and keep talking while we're in a conversation; Ken's requests can use my tools, friends just chat.");
 const j = joined[0];
-assert.deepEqual([j.guildId, j.channelId, j.botId, j.ownerId], ['g1', '666666666666666666', '900', '42'], 'Ken is the app\'s owner');
+assert.deepEqual([j.guildId, j.channelId, j.botId], ['g1', '666666666666666666', '900']);
+assert.ok(j.isOwner('42') && !j.isOwner('7'), 'Ken (the app\'s owner) is the owner, a friend isn\'t');
+ws.in({ op: 0, s: 7.5, t: 'VOICE_STATE_UPDATE', d: { guild_id: 'g1', user_id: '7', channel_id: '666666666666666666', member: { user: { id: '7', username: 'ola', global_name: 'Ola' } } } });
+assert.deepEqual(d.participants().sort(), ['Ola', 'someone (Ken, your owner)'].sort(), 'who is in the call with it');
 assert.equal(j.answer, callDeps.answer);
 assert.match(d.liveText(), /In the voice call in Hang out in Crew now/);
 // The voice library's adapter: its payloads go out on the gateway, and the bot's voice events come back to it.
@@ -139,4 +148,31 @@ const bad = createDiscord({ getToken: async () => null, saveToken: async (t) => 
 await assert.rejects(bad.tools[0].execute({}), /token is wrong or was reset/);
 await assert.rejects(createDiscord({ askToken: async () => 'nope', getToken: async () => null }).tools[0].execute({}), /doesn't look like a bot token/);
 assert.equal(saved, null);
+// Answering by itself: @mentions and DMs go to respondText with who it is (the owner set by id), and the reply is
+// posted back (as a reply in a channel); the channels' talk is kept for context, gif wars and bare GIFs left out.
+{
+  saved = TOKEN; sent.length = 0;
+  const asks = [];
+  const r = createDiscord({ getToken: async () => saved, saveToken: async () => {}, removeToken: async () => {}, askToken: async () => null, confirm: async () => true, checkMessage: checkDiscordMessage,
+    fetch, WebSocket: FakeSocket, owners: () => ['1489478031310585886'], now: () => 1000,
+    respondText: async (q) => { asks.push(q); await q.reply(q.owner ? 'On it.' : `Hi ${q.who}!`); } });
+  await r.start();
+  const w = sockets.at(-1);
+  w.in({ op: 0, s: 1, t: 'READY', d: { user: { id: '900', username: 'roamiesbot' } } });
+  w.in({ op: 0, s: 2, t: 'GUILD_CREATE', d: { id: 'g1', name: 'Crew', channels: [{ id: '111111111111111111', name: 'general', type: 0 }, { id: '777777777777777777', name: 'gif-wars', type: 0 }] } });
+  const msg = (id, ch, author, content, extra = {}) => w.in({ op: 0, s: 3, t: 'MESSAGE_CREATE', d: { id, guild_id: 'g1', channel_id: ch, author, content, timestamp: '2026-11-13T18:00:00Z', ...extra } });
+  const ola = { id: '7', username: 'ola', global_name: 'Ola' }, me = { id: '1489478031310585886', username: 'wiktor' };
+  msg('m1', '111111111111111111', ola, 'anyone up for a match tonight?');
+  msg('m2', '777777777777777777', ola, '<@900> look at this', { mentions: [{ id: '900' }] });
+  msg('m3', '111111111111111111', ola, 'https://tenor.com/view/lol-123');
+  msg('m4', '111111111111111111', ola, '<@900> who won yesterday?', { mentions: [{ id: '900' }] });
+  w.in({ op: 0, s: 4, t: 'MESSAGE_CREATE', d: { id: 'm5', channel_id: 'dm-me', author: me, content: 'open my notes please' } });
+  await new Promise((res) => setTimeout(res, 20));
+  assert.deepEqual(asks.map((q) => [q.who, q.owner, q.text, q.where]), [['Ola', false, 'who won yesterday?', '#general'], ['wiktor', true, 'open my notes please', 'a DM']], 'gif wars never reaches it; the owner is known by id');
+  assert.deepEqual(sent.map(([route, body]) => [route, body.content, body.message_reference?.message_id ?? null]), [['/channels/111111111111111111/messages', 'Hi Ola!', 'm4'], ['/channels/dm-me/messages', 'On it.', null]]);
+  assert.deepEqual(r.news(), [], 'answered by itself: nothing for the chat to pass on');
+  assert.deepEqual(r.activitySince(0), ['#general (Crew) Ola: anyone up for a match tonight?', '#general (Crew) Ola: <@900> who won yesterday?'], 'the talk, without gif wars or bare GIFs');
+  assert.deepEqual(r.activitySince(1000), [], 'only what came after');
+  r.stop();
+}
 console.log('discord tests: passed');

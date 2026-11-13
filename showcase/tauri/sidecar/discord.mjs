@@ -17,6 +17,11 @@ export const inviteUrl = (appId) => `https://discord.com/oauth2/authorize?client
 const TEXT_CHANNEL = new Set([0, 5]), VOICE_CHANNEL = 2; // stage channels (13) aren't for chatting
 const clip = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
+/** A channel left out of everything (default: gif wars): its name, with spaces, dashes and case ignored. */
+export const ignoredChannel = (name, ignore = ['gif wars']) => ignore.some((i) => { const k = (x) => String(x ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''); return k(i) && k(name).includes(k(i)); });
+/** Only a GIF (a Tenor or Giphy link, or GIF files): nothing to read. */
+export const gifOnly = (m) => { const t = String(m.content ?? '').trim(); return (!t || /^(<?https?:\/\/\S*(tenor|giphy)\S*>?\s*)+$/i.test(t)) && (t || (m.attachments ?? []).every((a) => /\.gif$/i.test(a.filename ?? ''))) && !!(t || m.attachments?.length); };
+
 /** A message as one line: [time] who: what (attachments named). */
 export function messageLine(m) {
   const who = m.author?.global_name || m.author?.username || 'someone';
@@ -47,12 +52,15 @@ export function resolveTarget(to, guilds) {
  * state changed), now.
  */
 export function createDiscord({ getToken, saveToken, removeToken, askToken, confirm, checkMessage, userName = 'the user', fetch = globalThis.fetch, WebSocket = globalThis.WebSocket, log = () => {}, onChange = () => {}, now = () => Date.now(), retryMs = 5000,
-  call = null, joinCall = async (o) => (await import('./discordvoice.mjs')).joinCall(o) }) {
+  call = null, joinCall = async (o) => (await import('./discordvoice.mjs')).joinCall(o),
+  owners = () => [], setOwners = () => {}, ignore = () => ['gif wars'], respondText = null }) {
   let token = null, me = null, ws = null, beat = null, seq = null, intents = INTENTS, retries = 0, stopped = true, problem = null, ownerId = null, inCall = null;
   const guilds = new Map(); // id → { id, name, channels: [{ id, name }], voice: [{ id, name }] }
   const voiceOf = new Map(); // user id → { guild, channel }: who is in which voice channel
   const adapters = new Map(); // guild id → the voice library's handlers, while it joins or is in a call
   const names = new Map(); // user id → display name
+  const recent = []; // what's said in its text channels (gif wars left out): { at, where, who, text }
+  const isOwner = (id) => !!id && (id === ownerId || owners().includes(String(id)));
   const people = new Map(); // lowercased name → { id, name, dm } (people who wrote, so "@name" finds them)
   const inbox = []; // untold: { id, who, where, text, at, told }
 
@@ -87,10 +95,23 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
     else if (t === 'MESSAGE_CREATE') {
       if (!d.author || d.author.bot || d.author.id === me?.id) return;
       const dm = !d.guild_id;
+      const g = guilds.get(d.guild_id), ch = g?.channels.find((c) => c.id === d.channel_id);
+      if (!dm && ignoredChannel(ch?.name, ignore())) return; // never looked at
       remember(d.author, dm ? d.channel_id : null);
+      const who = d.author.global_name || d.author.username;
+      if (!dm && !gifOnly(d)) {
+        recent.push({ at: now(), where: `#${ch?.name ?? 'a channel'}${g ? ` (${g.name})` : ''}`, who, text: messageLine(d).replace(/^\[[^\]]+\] [^:]+: /, '') });
+        if (recent.length > 200) recent.splice(0, recent.length - 200);
+      }
       const mentioned = (d.mentions ?? []).some((u) => u.id === me?.id) || d.referenced_message?.author?.id === me?.id;
       if (!dm && !mentioned) return;
-      const g = guilds.get(d.guild_id), ch = g?.channels.find((c) => c.id === d.channel_id);
+      // Said to it: it answers by itself, as in a call (only the owner's words reach the computer).
+      if (respondText) {
+        const reply = async (text) => { const v = checkMessage(text); if (v.level === 'block') return; await api('POST', `/channels/${d.channel_id}/messages`, { content: v.text, allowed_mentions: { parse: ['users'], replied_user: false }, ...(dm ? {} : { message_reference: { message_id: d.id } }) }); };
+        Promise.resolve(respondText({ text: String(d.content ?? '').replace(new RegExp(`<@!?${me?.id}>`, 'g'), '').trim(), who, userId: d.author.id, owner: isOwner(d.author.id), where: dm ? 'a DM' : `#${ch?.name ?? 'a channel'}`, reply }))
+          .catch((e) => log('discord_reply', { error: String(e?.message ?? e).slice(0, 160) }));
+        return;
+      }
       inbox.push({ id: `discord:${d.id}`, who: d.author.global_name || d.author.username, where: dm ? 'in a DM to the bot' : `in #${ch?.name ?? 'a channel'}${g ? ` (${g.name})` : ''}`, reply: dm ? `@${d.author.username}` : g && ch ? `${g.name}/#${ch.name}` : d.channel_id, text: messageLine(d).replace(/^\[[^\]]+\] [^:]+: /, ''), at: now(), told: false });
       if (inbox.length > 50) inbox.splice(0, inbox.length - 50);
       onChange();
@@ -170,7 +191,7 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
   function voiceChannelFor(to) {
     const gs = [...guilds.values()].map((g) => ({ name: g.name, id: g.id, channels: g.voice }));
     if (!to) {
-      const here = ownerId && voiceOf.get(ownerId);
+      const here = [ownerId, ...owners()].map((id) => id && voiceOf.get(id)).find(Boolean);
       if (!here) throw new Error(`${userName} isn't in a voice channel the bot can see. Say which one, like Server/General, or join one first.`);
       const g = guilds.get(here.guild);
       return { guild: here.guild, channel: here.channel, label: `${g?.voice.find((c) => c.id === here.channel)?.name ?? 'the voice channel'} in ${g?.name ?? 'the server'}` };
@@ -185,9 +206,11 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
   const tools = [
     {
       name: 'discord_setup',
-      description: `Connect ${userName}'s own Discord bot, so friends can message them through it and you can send messages as it, or disconnect it (off: true). They make the bot once at discord.com/developers/applications (New Application, then Bot: Reset Token, and switch on Message Content Intent); this opens a hidden field to paste the token in, so never ask them to type it in the chat. After it connects, give them the invite link it returns to add the bot to their server.`,
-      parameters: z.object({ off: z.boolean().optional() }),
-      execute: async ({ off }) => {
+      description: `Connect ${userName}'s own Discord bot, so friends can message them through it and you can send messages as it, or disconnect it (off: true). They make the bot once at discord.com/developers/applications (New Application, then Bot: Reset Token, and switch on Message Content Intent); this opens a hidden field to paste the token in, so never ask them to type it in the chat. After it connects, give them the invite link it returns to add the bot to their server. owner_id: the id of ${userName}'s own Discord account, when they give it (only that account's voice and messages reach their computer).`,
+      parameters: z.object({ off: z.boolean().optional(), owner_id: z.string().regex(/^\d{15,22}$/).optional() }),
+      execute: async ({ off, owner_id }) => {
+        // Which Discord account is theirs (its id): the one whose voice and messages reach the computer.
+        if (owner_id) { setOwners([owner_id]); return `Discord account ${owner_id} is ${userName}'s now: only its voice and messages can use the computer.`; }
         if (off) { stop(); token = null; me = null; guilds.clear(); await removeToken(); onChange(); return 'Discord is disconnected and its token is gone from this computer.'; }
         const pasted = String((await askToken()) ?? '').trim();
         if (!pasted) return `Nothing was pasted, so Discord isn't set up. They can try again whenever they like.`;
@@ -215,10 +238,10 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
         const where = voiceChannelFor(channel);
         if (inCall?.channelId === where.channel) return `Already in ${where.label}.`;
         inCall?.leave(); inCall = null;
-        inCall = await joinCall({ guildId: where.guild, channelId: where.channel, adapterCreator: adapterCreator(where.guild), botId: me.id, ownerId, nameOf, ...call });
+        inCall = await joinCall({ guildId: where.guild, channelId: where.channel, adapterCreator: adapterCreator(where.guild), botId: me.id, isOwner, nameOf, ...call });
         inCall.label = where.label;
         onChange();
-        return `Joined ${where.label}. I answer when someone says my name; ${userName}'s requests can use my tools, friends just chat.${ownerId ? '' : ` (I couldn't tell which Discord account is ${userName}'s, so nobody's voice gets the tools.)`}`;
+        return `Joined ${where.label}. I answer when someone says my name, and keep talking while we're in a conversation; ${userName}'s requests can use my tools, friends just chat.${ownerId || owners().length ? '' : ` (I couldn't tell which Discord account is ${userName}'s, so nobody's voice gets the tools.)`}`;
       },
     },
     {
@@ -266,5 +289,9 @@ export function createDiscord({ getToken, saveToken, removeToken, askToken, conf
   }));
   const markTold = (ids) => { for (const i of inbox) if (ids?.includes(i.id)) i.told = true; };
   const liveText = () => (token && stopped && problem ? `Discord: not connected, ${problem}; discord_setup with a new token fixes it.` : token ? `Discord: ${me ? `connected as the bot ${me.username}, in ${guilds.size} server${guilds.size === 1 ? '' : 's'}` : 'connecting'}${problem ? ` (${problem})` : ''}. Friends' messages to it come to you as news; discord_send replies.${inCall ? ` In the voice call in ${inCall.label} now (discord_call leave to hang up).` : ''}` : '');
-  return { tools, start, stop, news, markTold, liveText, dispatch };
+  /** Who's in the call with it now, owners marked. */
+  const participants = () => (inCall ? [...voiceOf].filter(([id, x]) => x.channel === inCall.channelId && id !== me?.id).map(([id]) => `${names.get(id) ?? 'someone'}${isOwner(id) ? ` (${userName}, your owner)` : ''}`) : []);
+  /** What was said in the text channels since a time, oldest first, as lines. */
+  const activitySince = (t, max = 30) => recent.filter((r) => r.at > t).slice(-max).map((r) => `${r.where} ${r.who}: ${r.text}`);
+  return { tools, start, stop, news, markTold, liveText, dispatch, participants, activitySince, isOwner, call: () => inCall };
 }

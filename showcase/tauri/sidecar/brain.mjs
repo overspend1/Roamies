@@ -27,16 +27,22 @@ export function sideThinking(provider, model, cap) {
   return LEVELS.indexOf(cap) < LEVELS.indexOf(lowest) ? cap : lowest;
 }
 
-async function once({ system, text, provider, model, cc, credsFor, cwd, signal, chatThinking, tools = [] }) {
+/** An agent for side work on the chat's route: { system, tools, provider, model, cc, credsFor, cwd, signal,
+ *  chatThinking, maxTurns, keepWarm (Claude Code: a process kept ready for the next prompt) }. It keeps its own
+ *  conversation across prompts. */
+export async function sideAgent({ system, provider, model, cc, credsFor, cwd, signal, chatThinking, tools = [], maxTurns = tools.length ? 4 : 1, keepWarm = false }) {
   const thinking = sideThinking(provider, model, chatThinking);
-  const common = { model, system, tools, maxTurns: tools.length ? 4 : 1, thinking, signal };
-  const agent = cc
-    ? new ClaudeCodeAgent({ ...common, executable: cc.executable, env: cc.env, cwd })
+  const common = { model, system, tools, maxTurns, thinking, signal };
+  return cc
+    ? new ClaudeCodeAgent({ ...common, executable: cc.executable, env: cc.env, cwd, keepWarm })
     : new Agent({
       ...common, provider,
       resolveCredentials: async () => { const c = await credsFor(model); return { apiKey: c.accessToken, ...(c.accountId !== undefined ? { accountId: c.accountId } : {}) }; },
       baseUrl: (await credsFor(model).catch(() => null))?.baseUrl,
     });
+}
+async function once(o) {
+  const agent = await sideAgent(o);
   let out = '';
   for await (const e of agentEvents(agent.prompt(text))) {
     if (e.type === 'text_delta') out += e.text;

@@ -25,56 +25,79 @@ assert.ok(addressed('Jarvis, play it', ['Roamie', 'Jarvis']));
 
 // ---- a stand-in voice library ----
 const speaking = new EventEmitter(), streams = new Map(), played = [];
-let destroyed = false;
+let destroyed = false, stops = 0;
 const lib = {
   VoiceConnectionStatus: { Ready: 'ready' }, AudioPlayerStatus: { Idle: 'idle' }, EndBehaviorType: { AfterSilence: 1 }, StreamType: { Raw: 'raw' },
   joinVoiceChannel: (o) => { lib.joined = o; return { receiver: { speaking, subscribe: (id) => streams.get(id) }, subscribe: () => {}, destroy: () => { destroyed = true; } }; },
   entersState: async () => {},
-  createAudioPlayer: () => ({ play: (r) => played.push(r), stop: () => {} }),
+  createAudioPlayer: () => ({ play: (r) => played.push(r), stop: () => { stops++; } }),
   createAudioResource: (stream, o) => { assert.equal(o.inputType, 'raw', 'raw PCM in'); const chunks = []; stream.on('data', (c) => chunks.push(c)); return { chunks }; },
 };
 // The "decoder" passes PCM straight through, so the test's opus stream is PCM.
 const prism = { opus: { Decoder: class extends Transform { _transform(c, e, cb) { cb(null, c); } } } };
-const heardWavs = [], answers = [];
-let transcript = 'Roamie, how far is the moon?';
+const heardWavs = [], asked = [];
+let transcript = '', reply = () => 'About 384,000 km.', hold = null;
+// openVoice: each sentence said becomes two samples of "audio" (its length, then 0).
+const openVoice = (onPcm) => ({ say: (t) => { const b = Buffer.alloc(4); b.writeInt16LE(t.length * 2, 0); onPcm(new Uint8Array(b)); }, end: async () => {}, abort: () => {} });
+let T = 0;
 const call = await joinCall({
-  guildId: 'g1', channelId: 'c1', adapterCreator: () => {}, botId: 'bot', ownerId: 'ken', nameOf: async (id) => ({ ken: 'Ken', ola: 'Ola' })[id] ?? 'someone',
-  names: () => ['Roamie'], transcribe: async (w) => { heardWavs.push(w); return transcript; },
-  synth: async (text, onPcm) => { onPcm(new Uint8Array(Buffer.from([2, 0, 4, 0]))); },
-  answer: async (q) => { answers.push(q); return q.owner ? 'Done, Ken.' : 'About 384,000 km.'; },
+  guildId: 'g1', channelId: 'c1', adapterCreator: () => {}, botId: 'bot', isOwner: (id) => id === 'ken', nameOf: async (id) => ({ ken: 'Ken', ola: 'Ola', bart: 'Bart' })[id] ?? 'someone',
+  names: () => ['Roamie'], transcribe: async (w) => { heardWavs.push(w); return transcript; }, openVoice,
+  respond: async (q) => { asked.push(q); if (hold) await hold; const r = reply(q); if (!r) { q.voice.abort(); return ''; } for (const sent of r.split('|')) q.voice.say(sent); await q.voice.end(); return r.replace(/\|/g, ' '); },
   lib, prism, now: () => T,
 });
-let T = 0;
 assert.deepEqual([lib.joined.guildId, lib.joined.channelId, lib.joined.selfDeaf], ['g1', 'c1', false], 'it joins able to hear');
-const talk = async (id, seconds) => {
-  const s = new PassThrough(); streams.set(id, s);
+const talk = async (id, seconds, words) => {
+  transcript = words;
+  const st = new PassThrough(); streams.set(id, st);
   speaking.emit('start', id);
-  s.end(Buffer.alloc(Math.round(seconds * 48000) * 4));
+  st.end(Buffer.alloc(Math.round(seconds * 48000) * 4));
   await new Promise((r) => setTimeout(r, 30));
+  await call.idle();
 };
-// A friend says its name: a chat answer, spoken in the call.
-await talk('ola', 1);
-assert.equal(heardWavs.length, 1);
-assert.deepEqual(answers.map((a) => [a.who, a.owner, a.text]), [['Ola', false, 'Roamie, how far is the moon?']]);
-assert.equal(played.length, 1);
-assert.deepEqual(samples(Buffer.concat(played[0].chunks)), [2, 2, 2, 2, 3, 3, 4, 4], 'its voice, at 48 kHz stereo');
+// Said to it by name: it answers, sentence by sentence as each is ready, in the call.
+await talk('ola', 1, 'Roamie, how far is the moon?');
+assert.deepEqual(asked.map((a) => [a.who, a.owner, a.addressed, a.text]), [['Ola', false, true, 'Roamie, how far is the moon?']]);
+assert.equal(played.length, 1, 'one reply, played once it has audio');
 assert.deepEqual(call.heard, ['Ola: Roamie, how far is the moon?', 'You: About 384,000 km.']);
-// The same friend goes on right after: still for it. Someone else talking among themselves: not.
-transcript = 'and the sun?';
-T = 5000; await talk('ola', 1);
-assert.equal(answers.length, 2, 'a follow-up from the same person');
-transcript = 'anyway, pizza tonight?';
-T = 6000; await talk('ken', 1);
-assert.equal(answers.length, 2, 'not said to it');
-// Ken asks: his request is the one that gets the tools (owner); the call so far rides along.
-transcript = 'Roamie, open my notes';
-T = 30_000; await talk('ken', 1);
-assert.deepEqual([answers.at(-1).who, answers.at(-1).owner], ['Ken', true]);
-assert.match(answers.at(-1).transcript, /Ken: anyway, pizza tonight\?\nKen: Roamie, open my notes$/);
+// In the conversation (45 s after it spoke): anything said goes to it, not named, and it may stay quiet.
+reply = (q) => (/sun/.test(q.text) ? '150 million km.|Give or take.' : '');
+T = 20_000; await talk('bart', 1, 'and the sun?');
+assert.deepEqual([asked.at(-1).who, asked.at(-1).addressed], ['Bart', false]);
+assert.deepEqual(samples(Buffer.concat(played.at(-1).chunks)).filter((_, i) => i % 4 === 2), [30, 0, 26, 0], 'both sentences in order, as each was said ("150 million km." then "Give or take.")');
+T = 40_000; await talk('ola', 1, 'anyway, pizza tonight?');
+assert.equal(asked.length, 3, 'heard in the conversation');
+assert.equal(call.heard.at(-1), 'Ola: anyway, pizza tonight?', 'it stayed quiet: no line of its own');
+// Long after, without its name: just part of the call, not for it.
+T = 200_000; await talk('ken', 1, 'pizza sounds good');
+assert.equal(asked.length, 3);
+assert.equal(call.heard.at(-1), 'Ken: pizza sounds good', 'still heard, as context');
+// Ken asks: his request is the owner's; the call so far rides along.
+reply = () => 'Opening them.';
+T = 210_000; await talk('ken', 1, 'Romy, open my notes');
+assert.deepEqual([asked.at(-1).who, asked.at(-1).owner, asked.at(-1).addressed], ['Ken', true, true]);
+assert.match(asked.at(-1).transcript, /Ken: pizza sounds good\nKen: Romy, open my notes$/);
+// "Stop" while it talks: it stops at once.
+let release; hold = new Promise((r) => { release = r; });
+reply = () => 'A very long story|that goes on';
+T = 220_000;
+transcript = 'Roamie, tell me a story';
+{ const st = new PassThrough(); streams.set('ola', st); speaking.emit('start', 'ola'); st.end(Buffer.alloc(48000 * 4)); }
+await new Promise((r) => setTimeout(r, 30));
+const playedBefore = played.length;
+transcript = 'Roamie stop';
+{ const st = new PassThrough(); streams.set('bart', st); speaking.emit('start', 'bart'); st.end(Buffer.alloc(48000 * 4)); }
+await new Promise((r) => setTimeout(r, 30));
+hold = null; release();
+await call.idle();
+assert.equal(asked.at(-1).text, 'Roamie, tell me a story', '"stop" is no question for it');
+assert.equal(played.length, playedBefore, 'the story never played');
+assert.ok(!call.heard.some((l) => l.startsWith('You: A very long story')), 'what it was told to stop isn\'t counted as said');
+assert.equal(call.heard.at(-1), 'Bart: Roamie stop');
 // Too short to be words, and the bot's own voice, are never sent off to be transcribed.
 const n = heardWavs.length;
-await talk('ola', 0.2);
-await talk('bot', 2);
+await talk('ola', 0.2, 'x');
+await talk('bot', 2, 'x');
 assert.equal(heardWavs.length, n);
 call.leave();
 assert.ok(destroyed);
